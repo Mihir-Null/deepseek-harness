@@ -5,12 +5,12 @@
          "core.rkt")
 
 (provide
- prop:config-schema
  (contract-out
   ;; `apply` is called as (apply ctx config); its result is an effect result.
   ;; `#:inject` lists required services: keys, pairs (key . interception-config), or a hash
-  ;; from key to interception config. `#:config` is #f, a procedure that returns the
-  ;; validated config or raises, or a value with `prop:config-schema`.
+  ;; from key to interception config. `#:config` is #f or a value applicable to the raw
+  ;; config (a procedure, or a struct with `prop:procedure`) that returns the validated
+  ;; config or raises.
   ;; `#:custodian 'inherit` runs the plugin under the custodian of the fiber it is mounted on.
   [make-plugin (->* ((and/c procedure? (procedure-arity-includes/c 2)))
                     (#:name (or/c string? symbol? #f)
@@ -27,15 +27,14 @@
   [plugin-provides (-> plugin? (listof symbol?))]
   [plugin-apply (-> plugin? procedure?)]
   [plugin-meta (-> plugin? hash?)]
-  [plugin-custodian-mode (-> plugin? (or/c 'own 'inherit))]
-  [config-schema? (-> any/c boolean?)]))
+  [plugin-custodian-mode (-> plugin? (or/c 'own 'inherit))]))
 
 (define inject/c
   (or/c (listof (or/c key? (cons/c key? any/c)))
         (hash/c key? any/c #:flat? #t)))
 
 (define schema/c
-  (or/c #f config-schema? (and/c procedure? (procedure-arity-includes/c 1))))
+  (or/c #f (and/c procedure? (procedure-arity-includes/c 1))))
 
 (define (make-plugin apply
                      #:name [name #f]

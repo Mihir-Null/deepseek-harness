@@ -638,7 +638,9 @@
        (parameterize ([current-baton-warn-ms 1])
          ;; `sleep` blocks the thread without releasing the baton
          (sync/t (wrap-evt (spawn-task (lambda () (sleep 0.1)) #:name 'baton-hog #:scheduler s)
-                           void))))
+                           void)))
+       ;; once the baton is granted again, the manager has dealt with the end of that hold
+       (call-in-kernel void #:scheduler s))
      #:level 'warning))
   (check-equal? (length events) 1)
   (check-eq? (vector-ref (car events) 0) 'warning)

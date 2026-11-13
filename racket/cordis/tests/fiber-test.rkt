@@ -900,7 +900,7 @@
 ;; Config schemas
 
 (struct range-schema (low high)
-  #:property prop:config-schema
+  #:property prop:procedure
   (lambda (schema raw)
     (cond
       [(and (hash? raw) (real? (hash-ref raw 'port #f))
@@ -910,9 +910,8 @@
              (list (cons '(server port) "expected a port in range")
                    (cons '() "invalid server section")))])))
 
-(test-case "schemas: a struct with prop:config-schema validates; failures have issues"
+(test-case "schemas: a struct with prop:procedure validates; failures have issues"
   (with-root-context (ctx)
-    (check-true (config-schema? (range-schema 1 2)))
     (define received #f)
     (define p (make-plugin (lambda (c config) (set! received config))
                            #:config (range-schema 1 1024)))

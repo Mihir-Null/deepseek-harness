@@ -344,10 +344,7 @@
            (define config (next))
            (define rt (fiber-runtime f))
            (define schema (and rt (runtime-schema rt)))
-           (cond
-             [(not schema) config]
-             [(config-schema? schema) ((config-schema-ref schema) schema config)]
-             [else (schema config)]))
+           (if schema (schema config) config))
          #f #f)))
 
 ;; ---------------------------------------------------------------------------------------

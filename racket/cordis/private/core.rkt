@@ -20,7 +20,6 @@
          (struct-out runtime)
          (struct-out plugin)
          (struct-out accessor)
-         prop:config-schema config-schema? config-schema-ref
          ->key key? json-string
          make-realm
          current-context call-with-context
@@ -87,9 +86,6 @@
 
 ;; ---------------------------------------------------------------------------------------
 ;; Plugins, runtimes, implementations, hooks
-
-(define-values (prop:config-schema config-schema? config-schema-ref)
-  (make-struct-type-property 'config-schema))
 
 ;; `key` is the registry identity (`eq?`): the apply procedure, or for `ctx-inject` the
 ;; callback. `inject` is the declaration as given, with symbol keys. `optional` lists the
