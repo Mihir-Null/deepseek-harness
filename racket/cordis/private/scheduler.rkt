@@ -19,7 +19,7 @@
          make-scheduler scheduler? scheduler-name scheduler-shutdown! scheduler-alive?
          spawn-task task? task-name task-scheduler task-done? task-result task-thread
          task-cancel! task-kill! task-wait task-failure task-observe!
-         current-task in-task?
+         current-task in-task? own-break?
          await await/timeout await-all yield-task task-sleep blocking call-in-kernel
          prop:awaitable awaitable? (struct-out awaiter)
          make-latch latch? latch-open! latch-open? latch-wait)
@@ -36,6 +36,15 @@
 ;; The task whose thunk the current thread runs, or #f. Not inherited by new threads.
 (define task-cell (make-thread-cell #f #f))
 (define (current-task) (thread-cell-ref task-cell))
+
+;; Break exceptions that ended another thread and were stored as its outcome. Raising one
+;; again, from `task-result` or `blocking`, reports that thread's cancellation; it is not a
+;; break of the thread that raises it.
+(define stored-breaks (make-weak-hasheq))
+
+;; True for a break that was delivered to the thread that sees it.
+(define (own-break? e)
+  (and (exn:break? e) (not (hash-ref stored-breaks e #f))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Awaitables
@@ -274,6 +283,8 @@
 
 (define (note-failure! t e)
   (define s (task-scheduler t))
+  (when (exn:break? e)
+    (hash-set! stored-breaks e #t))
   (log-cordis 'debug (format "task ~a raised: ~a" (task-name t) (error->string e)) e)
   (hash-set! (scheduler-unobserved s) t #t)
   (will-register (scheduler-wills s) t report-unobserved!))
@@ -405,7 +416,7 @@
              (cons 'raise e)
              (cons 'values (cdr (task-outcome x))))]
         [else
-         (with-handlers ([(lambda (e) (not (exn:break? e))) (lambda (e) (cons 'raise e))])
+         (with-handlers ([(lambda (e) (not (own-break? e))) (lambda (e) (cons 'raise e))])
            (call-with-values (lambda () (await x)) (lambda vs (cons 'values vs))))])))
   (define failed (findf (lambda (o) (eq? (car o) 'raise)) outcomes))
   (when failed (raise (cdr failed)))
@@ -441,10 +452,14 @@
          (thread
           (lambda ()
             (set! outcome
-                  (with-handlers ([(lambda (e) #t) (lambda (e) (cons 'raise e))])
+                  (with-handlers ([(lambda (e) #t)
+                                   (lambda (e)
+                                     (when (exn:break? e)
+                                       (hash-set! stored-breaks e #t))
+                                     (cons 'raise e))])
                     (call-with-values (lambda () (parameterize-break #t (thunk)))
                                       (lambda vs (cons 'values vs)))))))))
-     (with-handlers ([exn:break?
+     (with-handlers ([own-break?
                       (lambda (e)
                         (break-thread helper)
                         (thread (lambda ()

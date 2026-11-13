@@ -623,3 +623,49 @@
                         (void))))
     (await second-plugin)
     (check-pred without-inject? (unbox private))))
+
+;; source: recon 01 S21 and "Use site and definition site" items 4 and 5, in
+;; the form ADR 0003 gives them: a service procedure registers on the context
+;; or handle it is passed (use site) and resolves its own dependencies through
+;; the provider's context (definition site, lexical scope).
+(test-case "S21: an effect registered through a caller's handle belongs to the caller"
+  (with-root (ctx)
+    (ctx-provide ctx 'clock 'root-clock)
+    (define registry (make-hasheq))
+    (define provider
+      (ctx-plugin
+       ctx
+       (make-plugin
+        (lambda (c config)
+          (define clock (service-handle c 'clock))
+          (define (register! x name)
+            (ctx-effect (use-context x)
+                        (lambda ()
+                          (hash-set! registry name (service-value clock 'clock))
+                          (lambda () (hash-remove! registry name)))
+                        #:label "registry.register"))
+          (ctx-provide c 'registry (hasheq 'register! register!))
+          (void))
+        #:name "registry-provider"
+        #:inject '(clock))))
+    (await provider)
+    (define caller
+      (ctx-plugin
+       (context-isolate ctx 'clock)
+       (make-plugin
+        (lambda (c config)
+          (define registry-handle (service-handle c 'registry))
+          ((hash-ref (service-value registry-handle 'registry) 'register!) registry-handle 'entry)
+          (void))
+        #:name "registry-caller"
+        #:inject '(registry))))
+    (await caller)
+    ;; Owned by the caller, although the provider's code created it; the
+    ;; provider read `clock` through its own context, which the caller cannot.
+    (check-true (and (member "registry.register" (labels-of caller)) #t))
+    (check-false (member "registry.register" (labels-of provider)))
+    (check-equal? (hash-ref registry 'entry #f) 'root-clock)
+    (check-pred exn:fail:cordis:inject? (try-ref (fiber-context caller) 'clock))
+    (fiber-dispose! caller)
+    (check-false (hash-has-key? registry 'entry))
+    (check-eq? (fiber-state provider) 'active)))

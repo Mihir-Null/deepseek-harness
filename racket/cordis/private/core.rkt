@@ -29,7 +29,7 @@
          context-isolate context-intercept context-extend context-derive
          context-derive/rebindable context-rebind! context-own-realms context-own-intercepts
          fiber-name fiber-root? fiber-custodian fiber-idle-evt fiber-await fiber-wait
-         fiber-inject-keys
+         fiber-inject-keys fiber-injects? call-as-waiter
          set-inertia! busy-add! busy-remove! await-quiescence
          spawn-kernel-task call/kernel
          log-error-once log-fiber-error)
@@ -155,34 +155,37 @@
             (context-fiber (rebind-cell-parent cell))
             (kernel-root-fiber (context-kernel ctx))))))
 
+;; The realm `key` resolves in from `ctx`; #f while the key has no realm at all.
 (define (context-realm ctx key)
-  (cond
-    [(hash-ref (context-realm-overlay ctx) key #f)]
-    [(context-base ctx)
-     => (lambda (cell)
-          (or (hash-ref (rebind-cell-realms cell) key #f)
-              (context-realm (rebind-cell-parent cell) key)))]
-    [else (hash-ref (kernel-realms (context-kernel ctx)) key #f)]))
+  (let lookup ([ctx ctx] [key (->key key)])
+    (cond
+      [(hash-ref (context-realm-overlay ctx) key #f)]
+      [(context-base ctx)
+       => (lambda (cell)
+            (or (hash-ref (rebind-cell-realms cell) key #f)
+                (lookup (rebind-cell-parent cell) key)))]
+      [else (hash-ref (kernel-realms (context-kernel ctx)) key #f)])))
 
 ;; Interception layers for `key`, outermost first.
 (define (context-intercepts ctx key)
-  (define own (reverse (hash-ref (context-intercept-overlay ctx) key '())))
-  (define cell (context-base ctx))
-  (cond
-    [cell
-     (define mine (rebind-cell-intercepts cell))
-     (append (context-intercepts (rebind-cell-parent cell) key)
-             (if (hash-has-key? mine key) (list (hash-ref mine key)) '())
-             own)]
-    [else own]))
+  (let lookup ([ctx ctx] [key (->key key)])
+    (define own (reverse (hash-ref (context-intercept-overlay ctx) key '())))
+    (define cell (context-base ctx))
+    (cond
+      [cell
+       (define mine (rebind-cell-intercepts cell))
+       (append (lookup (rebind-cell-parent cell) key)
+               (if (hash-has-key? mine key) (list (hash-ref mine key)) '())
+               own)]
+      [else own])))
 
 (define (context-meta ctx key [default #f])
-  (define own (context-meta-overlay ctx))
-  (cond
-    [(hash-has-key? own key) (hash-ref own key)]
-    [(context-base ctx)
-     => (lambda (cell) (context-meta (rebind-cell-parent cell) key default))]
-    [else default]))
+  (let lookup ([ctx ctx] [key (->key key)])
+    (define own (context-meta-overlay ctx))
+    (cond
+      [(hash-has-key? own key) (hash-ref own key)]
+      [(context-base ctx) => (lambda (cell) (lookup (rebind-cell-parent cell) key))]
+      [else default])))
 
 ;; The general derivation: a child of `ctx` with the given additions.
 (define (context-derive ctx
@@ -260,7 +263,8 @@
    [uid #:mutable]             ; #f once disposal has started
    [ctx #:mutable]
    [parent-ctx #:mutable]      ; the context the fiber was created on, #f for the root
-   [injects #:mutable]         ; alist key -> intercept config or #f, declaration order
+   inject-table                ; mutable hasheq: key -> intercept config or #f
+   [inject-order #:mutable]    ; keys of inject-table in declaration order
    [raw-config #:mutable]
    [effective #:mutable]
    [state #:mutable]
@@ -278,7 +282,9 @@
    [release #:mutable]         ; latch opened when a provision loses its last dependent
    [own-custodian #:mutable]   ; custodian of the current activation, #f in mode 'inherit
    [dispose-proc #:mutable]    ; disposer of the ctx.plugin() effect, #f for the root
-   props)                      ; mutable hasheq for data attached by the loader
+   props                       ; mutable hasheq for data attached by the loader
+   [custodian-parent #:mutable] ; the custodian own-custodian was made under
+   waiting)                    ; mutable hasheq: thread that waits for this fiber -> depth
   #:property prop:evt
   (lambda (f) (fiber-idle-evt f))
   #:property prop:awaitable
@@ -292,8 +298,29 @@
 (define (fiber-root? f)
   (not (fiber-runtime f)))
 
+;; Injected keys in order: declaration order, then keys that observers added to the table
+;; (`fiber-inject` hands the table itself to `internal/plugin` observers), by name.
 (define (fiber-inject-keys f)
-  (map car (fiber-injects f)))
+  (define table (fiber-inject-table f))
+  (define order (fiber-inject-order f))
+  (cond
+    [(and (= (length order) (hash-count table))
+          (andmap (lambda (key) (hash-has-key? table key)) order))
+     order]
+    [else
+     (define known (filter (lambda (key) (hash-has-key? table key)) order))
+     (define added
+       (sort (for/list ([key (in-list (hash-keys table))]
+                        #:when (symbol? key)
+                        #:unless (memq key known))
+               key)
+             symbol<?))
+     (define keys (append known added))
+     (set-fiber-inject-order! f keys)
+     keys]))
+
+(define (fiber-injects? f key)
+  (hash-has-key? (fiber-inject-table f) key))
 
 ;; The nearest plugin name up the chain of creating contexts; "root" when there is none.
 (define (fiber-name f)
@@ -327,14 +354,32 @@
 ;; Waits until no transition is in flight. A call from the fiber's own transition task
 ;; returns at once, because waiting there could never finish.
 (define (fiber-wait f)
-  (let loop ()
-    (define i (fiber-inertia f))
-    (when (and i (not (eq? i (current-task))))
-      (task-result i)
-      (when (eq? (fiber-inertia f) i)
-        (raise-cordis "fiber ~a: a transition ended without settling" (fiber-name f)))
-      (loop)))
+  (when (fiber-inertia f)
+    (call-as-waiter
+     f
+     (lambda ()
+       (let loop ()
+         (define i (fiber-inertia f))
+         (when (and i (not (eq? i (current-task))))
+           (task-result i)
+           (when (eq? (fiber-inertia f) i)
+             (raise-cordis "fiber ~a: a transition ended without settling" (fiber-name f)))
+           (loop))))))
   (void))
+
+;; Marks the current thread as waiting for `f` while `thunk` runs. A thread so marked is not
+;; killed by the custodian shutdown that ends an unload it waits for (see lifecycle.rkt).
+(define (call-as-waiter f thunk)
+  (define th (current-thread))
+  (define table (fiber-waiting f))
+  (define depth (hash-ref table th 0))
+  (dynamic-wind
+   (lambda () (hash-set! table th (add1 depth)))
+   thunk
+   (lambda ()
+     (if (zero? depth)
+         (hash-remove! table th)
+         (hash-set! table th depth)))))
 
 (define (fiber-await f)
   (fiber-wait f)

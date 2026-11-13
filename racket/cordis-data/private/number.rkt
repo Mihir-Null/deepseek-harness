@@ -39,10 +39,42 @@
     [else (positive-flonum->js-string x)]))
 
 ;; x is positive and finite. `number->string` yields the shortest digits that read back as x,
-;; in the form digits[.digits][e[+-]digits]; only the layout differs from JavaScript's.
+;; in the form digits.digits or digits[.digits]e[+-]digits; only the layout, and the digit
+;; chosen on a tie, differ from JavaScript's.
 (define (positive-flonum->js-string x)
   (define s (number->string x))
   (define len (string-length s))
+  ;; In this range JavaScript writes plain positional digits; when Racket did too, `point` is
+  ;; the index of its decimal point.
+  (define point (and (fl>= x 1e-6) (fl< x 1e21) (plain-point-index s len)))
+  (cond
+    [(not point) (digits->js-string x s len)]
+    ;; An integer of 2^53 or more, to which Racket appends ".0".
+    [(and (fx= point (fx- len 2)) (char=? (string-ref s (fx- len 1)) #\0))
+     (digits->js-string x s len)]
+    ;; Sixteen or more digits ending in an odd one may be the upper side of a tie.
+    [(and (fx>= len 17)
+          (odd-digit? (string-ref s (fx- len 1)))
+          (may-be-halfway? x (fx- (fx- len point) 1)))
+     (digits->js-string x s len)]
+    [else s]))
+
+;; The index of the decimal point when s is plain positional digits such as "12.5"; #f when s
+;; has an exponent.
+(define (plain-point-index s len)
+  (let loop ([i 0] [point #f])
+    (cond
+      [(fx= i len) point]
+      [(char=? (string-ref s i) #\e) #f]
+      [(char=? (string-ref s i) #\.) (loop (fx+ i 1) i)]
+      [else (loop (fx+ i 1) point)])))
+
+(define (odd-digit? c)
+  (fx= 1 (fxand 1 (char->integer c))))
+
+;; The general case: takes Racket's text `s` apart into digits and a decimal exponent and lays
+;; them out again by Number::toString's rules.
+(define (digits->js-string x s len)
   (define e-index (find-char s #\e len))
   (define dot-index (find-char s #\. e-index))
   (define exponent (if (fx= e-index len) 0 (string->number (substring s (fx+ e-index 1)) 10)))
@@ -71,26 +103,29 @@
 ;; two neighbouring candidates are too far apart to both read back as x.
 (define (even-on-tie x digits n)
   (define k (string-length digits))
+  (define scale (- k n))
   (cond
     [(and (fx>= k 16)
-          (odd? (char->integer (string-ref digits (fx- k 1))))
-          (halfway-below? x (string->number digits 10) (- k n)))
-     (define lower (- (string->number digits 10) 1))
-     ;; The lower candidate counts only if it too reads back as x.
-     (if (fl= x (real->double-flonum (* lower (expt 10 (- n k)))))
+          (odd-digit? (string-ref digits (fx- k 1)))
+          (may-be-halfway? x scale))
+     (define upper (string->number digits 10))
+     (define lower (- upper 1))
+     (if (and
+          ;; x x 10^scale is exactly upper - 1/2,
+          (= (* 2 (inexact->exact x) (expt 10 scale)) (- (* 2 upper) 1))
+          ;; and the lower candidate too reads back as x.
+          (fl= x (real->double-flonum (* lower (expt 10 (- scale))))))
          (number->string lower)
          digits)]
     [else digits]))
 
-;; Whether x x 10^scale is exactly `upper` - 1/2, for an exact integer `upper`.
-(define (halfway-below? x upper scale)
-  (and
-   ;; With `scale` decimal places the halfway point has exactly scale + 1 binary places, so a
-   ;; flonum test rules out nearly every x before any exact arithmetic.
-   (or (< scale 0)
-       (let ([shifted (fl* x (flexpt 2.0 (fx->fl (+ scale 1))))])
-         (fl= shifted (flfloor shifted))))
-   (= (* 2 (inexact->exact x) (expt 10 scale)) (- (* 2 upper) 1))))
+;; A cheap necessary condition for x x 10^scale to end in exactly one half: with `scale`
+;; decimal places such a value has exactly scale + 1 binary places. It rules out nearly every
+;; x before any exact arithmetic.
+(define (may-be-halfway? x scale)
+  (or (< scale 0)
+      (let ([shifted (fl* x (flexpt 2.0 (fx->fl (+ scale 1))))])
+        (fl= shifted (flfloor shifted)))))
 
 ;; Index of the first `c` in s before `end`, or `end`.
 (define (find-char s c end)

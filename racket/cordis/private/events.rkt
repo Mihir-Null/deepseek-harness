@@ -64,8 +64,7 @@
   (define hooks (hash-ref table name '()))
   (if accept?
       (for/list ([h (in-list hooks)]
-                 #:when (or (hook-global? h)
-                            (call-user (lambda () (accept? (hook-ctx h))))))
+                 #:when (or (hook-global? h) (accept? (hook-ctx h))))
         h)
       hooks))
 
@@ -75,9 +74,14 @@
      (parameterize ([current-context (hook-ctx h)])
        (apply (hook-callback h) args)))))
 
-(define (dispatch-emit ctx name args #:filter [accept? #f])
+;; With `atomic?` the listeners run with breaks off: for the kernel's own notifications in
+;; the middle of a state change, where a break would leave the change half reported.
+(define (dispatch-emit ctx name args #:filter [accept? #f] #:atomic? [atomic? #f])
   (for ([h (in-list (resolve ctx 'emit name args accept?))])
-    (call-listener h args))
+    (if atomic?
+        (parameterize ([current-context (hook-ctx h)])
+          (apply (hook-callback h) args))
+        (call-listener h args)))
   (void))
 
 ;; `serial` and `bail` differ only in the mode reported to `internal/dispatch`.
@@ -113,7 +117,7 @@
       (spawn-task (lambda () (call-listener h args) (void))
                   #:name 'parallel-listener
                   #:scheduler s)))
-  (with-handlers ([exn:break?
+  (with-handlers ([own-break?
                    (lambda (e)
                      (for ([t (in-list tasks)])
                        (task-observe! t)
@@ -140,10 +144,10 @@
     (with-handlers ([(lambda (e) #t) (lambda (e) (contain e on-error))])
       (call-listener h args))))
 
-;; For handlers that swallow a failure of user code: a break is not a failure of that
-;; code, so it is queued again for the current thread instead of being reported.
+;; For handlers that swallow a failure of user code: a break of the current thread is not
+;; a failure of that code, so it is queued again for the thread instead of being reported.
 (define (contain e on-error)
-  (if (exn:break? e)
+  (if (own-break? e)
       (break-thread (current-thread))
       (on-error e)))
 
@@ -212,8 +216,9 @@
          (ctx-effect* ctx
                       (lambda ()
                         (add-hook! k key h)
-                        (lambda () (remove-hook! k key h)))
-                      (format "ctx.on(~a)" (json-string key)))])))))
+                        (kernel-inverse (lambda () (remove-hook! k key h))))
+                      (format "ctx.on(~a)" (json-string key))
+                      #:kernel? #t)])))))
 
 ;; The listener removes itself before its first call.
 (define (ctx-once ctx name listener #:prepend? [prepend? #f] #:global? [global? #f])
@@ -244,9 +249,11 @@
                              (define old (fiber-update-hooks f))
                              (set-fiber-update-hooks!
                               f (if (hook-prepend? h) (cons h old) (append old (list h))))
-                             (lambda ()
-                               (set-fiber-update-hooks! f (remq h (fiber-update-hooks f)))))
-                           "ctx.on(\"internal/update\")")]
+                             (kernel-inverse
+                              (lambda ()
+                                (set-fiber-update-hooks! f (remq h (fiber-update-hooks f))))))
+                           "ctx.on(\"internal/update\")"
+                           #:kernel? #t)]
              [else #f]))
          #f #f))
   ;; Runs the updated fiber's own listeners, in registration order, inside the chain.

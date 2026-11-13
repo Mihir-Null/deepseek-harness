@@ -47,11 +47,15 @@
   (void))
 
 ;; Runs `proc` with a fresh root context as a task, bounded by `spec-timeout`.
+;; `current-scheduler` is the root's scheduler in the body, so `spawn-task`
+;; there needs no #:scheduler; code that runs in kernel-created tasks (plugin
+;; bodies, inverses, listeners) passes the scheduler explicitly.
 (define (call-with-root proc)
   (define gates (box '()))
   (call-with-root-context
    (lambda (ctx)
-     (parameterize ([current-gates gates])
+     (parameterize ([current-gates gates]
+                    [current-scheduler (context-scheduler ctx)])
        (dynamic-wind
         void
         (lambda () (proc ctx))

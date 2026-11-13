@@ -18,7 +18,8 @@
   (define failures '())
   (define (fail! section row what expected actual)
     (set! failures
-          (cons (format "~a ~s\n  ~a\n  expected: ~s\n  actual:   ~s" section row what expected actual)
+          (cons (format "~a ~s\n  ~a\n  expected: ~s\n  actual:   ~s"
+                        section row what expected actual)
                 failures)))
   ;; Records a mismatch unless `actual` (a thunk's result, or the exception it raised) is
   ;; `equal?` to `expected`.
@@ -33,7 +34,8 @@
     (define value (decode (first row)))
     (define indent (second row))
     (define text (third row))
-    (expect! 'stringify row "jvalue->string" text (lambda () (jvalue->string value #:indent indent)))
+    (expect! 'stringify row "jvalue->string" text
+             (lambda () (jvalue->string value #:indent indent)))
     (expect! 'stringify row "jvalue->bytes" (string->bytes/utf-8 text)
              (lambda () (jvalue->bytes value #:indent indent)))
     (expect! 'stringify row "write-jvalue" text
@@ -54,6 +56,10 @@
       (unless (same-value? actual expected)
         (fail! 'parse row what expected actual)))
     (check! "string->jvalue" (lambda () (string->jvalue text)))
+    ;; JavaScript reorders keys that are array indexes; cordis-data keeps the order of the text.
+    (unless (has-array-index-key? expected)
+      (expect! 'parse row "write of read" (third row)
+               (lambda () (jvalue->string (string->jvalue text)))))
     (check! "bytes->jvalue" (lambda () (bytes->jvalue (string->bytes/utf-8 text))))
     (define in (open-input-bytes (string->bytes/utf-8 text)))
     (check! "read-jvalue" (lambda () (read-jvalue in)))
@@ -117,12 +123,21 @@
     (expect! 'truncations row "utf8-truncate" utf8-prefix (lambda () (utf8-truncate str limit))))
 
   (for ([row (in-list (section-rows table 'order))])
-    (expect! 'order row "js-string<?" (third row) (lambda () (js-string<? (first row) (second row)))))
+    (expect! 'order row "js-string<?" (third row)
+             (lambda () (js-string<? (first row) (second row)))))
 
   (for ([row (in-list (section-rows table 'utf8))])
     (define quoted (bytes-append #"\"" (apply bytes (first row)) #"\""))
     (expect! 'utf8 row "bytes->jvalue" (second row) (lambda () (bytes->jvalue quoted)))
-    (expect! 'utf8 row "read-jvalue" (second row) (lambda () (read-jvalue (open-input-bytes quoted)))))
+    (expect! 'utf8 row "read-jvalue" (second row)
+             (lambda () (read-jvalue (open-input-bytes quoted)))))
+
+  (for ([row (in-list (section-rows table 'equality))])
+    (define a (decode/undefined (first row)))
+    (define b (decode/undefined (second row)))
+    (expect! 'equality row "deep-equal?" (third row) (lambda () (deep-equal? a b)))
+    (expect! 'equality row "deep-equal? #:strict? #t" (fourth row)
+             (lambda () (deep-equal? a b #:strict? #t))))
 
   (values (for/hasheq ([section (in-list table)])
             (values (car section) (length (cdr section))))
@@ -130,6 +145,10 @@
 
 (define (section-rows table name)
   (cdr (or (assq name table) (error 'check-node-table "the table has no ~a section" name))))
+
+;; As `decode`, for the equality section, where the symbol `undefined` is a whole value.
+(define (decode/undefined datum)
+  (if (eq? datum 'undefined) (void) (decode datum)))
 
 ;; The jvalue a table datum stands for.
 (define (decode datum)
@@ -149,6 +168,15 @@
   (define name (symbol->string key))
   (and (regexp-match? #rx"^(0|[1-9][0-9]*)$" name)
        (< (string->number name) 4294967295)))
+
+;; Whether any object inside `value` has a key that is an array index.
+(define (has-array-index-key? value)
+  (cond
+    [(jobject? value)
+     (or (ormap array-index-key? (jkeys value))
+         (ormap has-array-index-key? (jvalues value)))]
+    [(list? value) (ormap has-array-index-key? value)]
+    [else #f]))
 
 ;; Whether the reader's result is the value JSON.parse produced: the same keys in the same
 ;; order (as a set when JavaScript reordered them), the same strings, and numbers that are the

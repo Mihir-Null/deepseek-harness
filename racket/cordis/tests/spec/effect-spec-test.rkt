@@ -380,8 +380,10 @@
     (define log (make-recorder))
     (define (sub tag)
       (ctx-effect ctx (lambda () (lambda () (note! log tag))) #:label (symbol->string tag)))
-    (define outer (ctx-effect ctx (lambda () (generator () (yield (sub 'a)) (yield (sub 'b)) (void)))
-                              #:label "outer"))
+    (define outer
+      (ctx-effect ctx
+                  (lambda () (generator () (yield (sub 'a)) (yield (sub 'b)) (void)))
+                  #:label "outer"))
     (check-equal? (labels-of rf) (append before '("outer")))
     (check-equal? (map disposer-label (disposer-children outer)) '("a" "b"))
     (outer)

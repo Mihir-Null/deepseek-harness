@@ -1,6 +1,6 @@
 # Interface contract: `dsh-tools`
 
-This is the binding interface for `racket/dsh-tools/`. It covers the scope library, cancellation values, the tool definition forms and the JSON Schema subset behind them, the scoped tool registry `tools`, the guarded execution pipeline and batch scheduler, the system prompt service `systemPrompt`, the native executor and the deprecated presentation selector. Sources: [recon 04](../recon/04-core-data.md), `packages/core/{system-prompt,tools,scope,tool-executor-native,agent-tool-presentation}/src` at commit `e8f7b93a3`, `docs/tool-execution-pipeline.md`, `docs/cookbook/adding-a-tool.md`. When this document and the TypeScript disagree about behaviour, the TypeScript is right and this document gets fixed. When they disagree about names and argument order of the Racket surface, this document is right. Read [dsh-session.md](dsh-session.md) first; this contract uses its vocabulary (`absent`, `session-event` constructors, `scope-core`, `lossless-json?`).
+This is the binding interface for `racket/dsh-tools/`. It covers the scope library, the tool definition forms and the JSON Schema subset behind them, the scoped tool registry `tools`, the guarded execution pipeline and batch scheduler, the system prompt service `systemPrompt`, the native executor and the deprecated presentation selector. Sources: [recon 04](../recon/04-core-data.md), `packages/core/{system-prompt,tools,scope,tool-executor-native,agent-tool-presentation}/src` at commit `e8f7b93a3`, `docs/tool-execution-pipeline.md`, `docs/cookbook/adding-a-tool.md`. When this document and the TypeScript disagree about behaviour, the TypeScript is right and this document gets fixed. When they disagree about names and argument order of the Racket surface, this document is right. Read [dsh-session.md](dsh-session.md) first; this contract uses its vocabulary (`absent`, `session-event` constructors, `scope-core`, `lossless-json?`). Cancel sources and cancel events are those of `dsh-llm/cancel` ([dsh-llm.md](dsh-llm.md), "Cancellation").
 
 Package: directory `racket/dsh-tools/`, collection `dsh-tools`, `(define deps '("base" "cordis" "cordis-data" "cordis-schema" "dsh-util" "dsh-session" "dsh-llm"))`, `(define build-deps '("rackunit-lib"))`. It must not depend on `dsh-agent`: an agent is an opaque scope key here.
 
@@ -22,7 +22,7 @@ Not applicable: the TypeScript type inference of the schema DSL (`InferArgs`, `I
 |---|---|
 | `dsh-tools` (`main.rkt`) | re-exports `tool`, `schema`, `json-schema`, `tools`, `errors`, `presentation`, `cancel` |
 | `dsh-tools/scope` | everything in `dsh-session/scope-core`, plus `create-scope`, `scope`, `named-entries`, `anonymous-entries`, `scoped-layers` |
-| `dsh-tools/cancel` | cancel sources and cancel events |
+| `dsh-tools/cancel` | a re-export of every binding of `dsh-llm/cancel`, so that a tool author requires one package |
 | `dsh-tools/errors` | error constructors, predicates, codes |
 | `dsh-tools/json-schema` | the enforced JSON Schema subset: `assert-supported-json-schema`, `assert-object-json-schema`, `validate-json-schema-value` |
 | `dsh-tools/schema` | the author schema DSL (`v-string` and the other node constructors), `parameter-spec->json-schema`, `value-spec->json-schema`, `validate-args`, `project-tool-schema` |
@@ -60,20 +60,7 @@ Not applicable: the TypeScript type inference of the schema DSL (`InferArgs`, `I
 
 ### Cancellation
 
-A *cancel event* is any Racket `evt` that, once ready, stays ready; its synchronization result is the abort reason. It is the Racket form of `AbortSignal`.
-
-```racket
-(make-cancel-source) -> cancel-source?              ; AbortController
-(cancel-source-evt src) -> evt?                     ; AbortSignal
-(cancel! src [reason (make-abort-error)]) -> void?  ; the first call fixes the reason
-(cancelled? evt) -> boolean?                        ; polls, never blocks
-(cancel-reason evt) -> any/c                        ; the reason, or #f when not cancelled
-(check-cancelled! evt) -> void?                     ; raises the reason when cancelled (throwIfAborted)
-(cancel-evt-any evt ...) -> evt?                    ; ready when any argument is; the reason is that of the first ready argument in argument order
-never-cancelled                                     ; never-evt
-(struct exn:fail:abort exn:fail ())                 ; the counterpart of an Error named AbortError
-(make-abort-error [message "This operation was aborted"]) -> exn:fail:abort?
-```
+A *cancel event* is the Racket form of `AbortSignal`: any `evt` that, once ready, stays ready and whose synchronization result is the abort reason. The values are defined in `dsh-llm/cancel`, the lowest package that takes a cancel event, and are specified there; `dsh-tools/cancel` and `dsh-tools` re-export them unchanged: `make-cancel-source`, `cancel-source?`, `cancel-source-evt`, `cancel!`, `cancelled?`, `cancel-reason`, `check-cancelled!`, `cancel-evt-any`, `never-cancelled`, `exn:fail:abort`, `make-abort-error`. The `cancel` of `make-tool-execution-input`, `make-tool-batch-input`, `tools-resolve`, `tool-activation-context` and `approval-request` is such an event and never `#f`; a caller with nothing to cancel passes `never-cancelled`. Only the `'cancel` entry of an assemble context may be absent.
 
 ### Schemas
 
@@ -202,6 +189,8 @@ JSON form of a result (`pipeline.ts:599-614`): a failure is `{isError: true, err
 (struct approval-request (agent tool-name call-id reason display-reason cancel) #:transparent)
 ```
 
+Exporting modules. `dsh-tools/tool` exports the execution input and execution, the result values, `tool-error-info` and the decision structs (`pre-allow` to `tool-guard-denial`). `dsh-tools/tools` exports `tool-activation-context`, `resolved-tool-set?` with `tool-set-definitions`, `tool-set-ref` and `tool-set-dispose!`, the batch data (`tool-batch-log`, `make-tool-batch-input`, `tool-call-result`, `tool-batch-result`) and the executor data (`tool-prompt-section`, `tool-model-input`). `dsh-tools/pipeline` exports `tool-preparation` and `tool-dispatch-outcome`. `dsh-tools/approval` exports `approval-request`. Where a value of a later module appears in an earlier one (`tool-execution-tool-set` returns a resolved tool set), the earlier module's contract is `any/c`.
+
 `calls` is a list of `tool-call` content blocks (jobjects with `id`, `name`, `arguments`, the raw model text). `make-post-accept` raises `exn:fail:contract` with message `tools/post-execute accept decision cannot replace both value and content` when both are given.
 
 ### Presentation views
@@ -248,7 +237,7 @@ All are substructs of `exn:fail:harness` declared in `dsh-tools/errors` and made
 | `(make-tool-executor-unavailable-error)` | `ToolExecutorUnavailableError` | `TOOL_EXECUTOR_UNAVAILABLE` | `The selected tool executor is unavailable. Load an executor in this composition before running the agent.` |
 | `(make-json-schema-error violations)` | `JsonSchemaError` | `UNSUPPORTED_SCHEMA` | `unsupported JSON schema: <v1>; <v2>…` |
 
-The three with violations expose them through `(harness-error-violations e)`. `(struct exn:fail:tool-batch exn:fail (cause partial))` is `ToolBatchExecutionError` with message `Tool batch execution failed`; it is not a harness error. Constants: `run-code-name` `"run_code"`, `tool-aborted` `"ABORTED"`, `tool-aborted-before-dispatch` `"ABORTED_BEFORE_DISPATCH"`, `approval-error-name` `"ApprovalError"`, `approval-rejected`, `approval-cancelled`, `approval-unavailable` (the code strings of the same spelling in upper case with underscores). `(harness-error-info v) -> (or/c #f tool-error-info?)` returns `(tool-error-info name code #f)` for an `exn:fail:harness` and `#f` for anything else; it is the only place that reads the `dsh-util` struct.
+The three with violations expose them through `(harness-error-violations e)`. `(struct exn:fail:tool-batch exn:fail (cause partial))` is `ToolBatchExecutionError` with message `Tool batch execution failed`; `cause` is the raised value and `partial` a `tool-batch-result?` holding only the committed calls. It is not a harness error. Constants: `run-code-name` `"run_code"`, `tool-aborted` `"ABORTED"`, `tool-aborted-before-dispatch` `"ABORTED_BEFORE_DISPATCH"`, `approval-error-name` `"ApprovalError"`, `approval-rejected`, `approval-cancelled`, `approval-unavailable` (the code strings of the same spelling in upper case with underscores). `(harness-error-info v) -> (or/c #f tool-error-info?)` returns `(tool-error-info name code #f)` for an `exn:fail:harness` and `#f` for anything else; it is the only place that reads the `dsh-util` struct.
 
 ## Services
 
@@ -336,9 +325,23 @@ Declared with `(define-service tools 'tools #:contract tools-service?)`, which d
 
 The pipeline reads the `tools` service value once at construction and keeps it, so accepted calls settle after the service is withdrawn.
 
+### Waiting and cancellation
+
+Every procedure that can wait says how it is cancelled:
+
+- `tools-resolve`: `#:cancel`; it raises the cancel reason (rule 19).
+- `tools-execute`, `tool-executor-execute` and `execute-tool-batch`: the batch input's cancel event; a cancelled batch returns normally with aborted results (rule 46).
+- `pipeline-prepare`, `pipeline-dispatch` and `pipeline-complete`: the execution input's cancel event, observed at the points of rules 31, 33, 34 and 37; cancellation becomes a result (rule 40) and a started tool body is never abandoned.
+- A tool body and a `when` condition: the event they are given (`tool-execution-cancel`, `tool-activation-context-cancel`).
+- `tool-approval-request`: the `cancel` field of the request.
+- `system-prompt-assemble` and `system-prompt-refresh-context`: the `'cancel` entry of the assemble context. The service hands it to the providers and does not check it itself, as in dsh; the caller checks after the call returns.
+- `scope-dispose` takes no cancel event: it waits for the scope fiber's unload, which must complete.
+
+None of these catches a break. A break delivered to a task that waits inside one of them propagates (cordis-kernel section 2 rule 4) and is never turned into a tool result; dispatch tasks already started by `execute-tool-batch` keep running until their cancel event or their custodian stops them, and the caller that was broken is responsible for cancelling the batch's event and recording what is still pending (dsh-agent rules 37 and 55).
+
 ## Events
 
-Declared in the service definition modules. The modules export the `on-…` and `…-name` bindings and do not export the generated dispatchers: the two change events are emitted only by the services, and the other five are dispatched only by this package through `scoped-dispatch` or `scoped-callbacks`.
+Declared in the service definition modules. The modules export the `on-…` and `…-name` bindings. Of the generated dispatchers only `dispatch-tools/change` is exported: dsh's `@deepseek-ai/dsh-agent-preset-registry` (wave 4) also emits `tools/change` when a preset changes an agent's tools (`packages/preset/agent-preset-registry/src/index.ts:352`). `system-prompt/change` is emitted only by the `systemPrompt` service, and the other five events are dispatched only by this package through `scoped-dispatch` or `scoped-callbacks`.
 
 ```racket
 (define-event system-prompt/assemble 'system-prompt/assemble #:mode waterfall
@@ -359,7 +362,7 @@ Declared in the service definition modules. The modules export the `on-…` and 
 | `tools/execute` | `pipeline-dispatch` | same | The innermost step runs the tool body. A listener may change only the cancel event of `exec`. May overlap with sibling calls. |
 | `tools/post-execute` | `pipeline-complete` for `'post-result` outcomes | same | The innermost step returns `(make-post-accept)`. Runs in model order. Not run for `'final-result` outcomes. |
 | `tools/result` | the end of `pipeline-complete`, exactly once per call, before the `tool/result` session event is appended | same | `exec` no longer accepts changes. Each listener is contained; a failure is logged at `warning` as `tool "<name>" (<callId>): tools/result observer failed: <message>`. |
-| `tools/change` | `tools-register!`, `tools-restrict!` and their disposals | unfiltered | Not emitted by `tools-guard!` or `tools-set-executor!`. A listener that raises during a registration rolls it back. |
+| `tools/change` | `tools-register!`, `tools-restrict!` and their disposals; the preset registry of wave 4 through `dispatch-tools/change` | unfiltered | Not emitted by `tools-guard!` or `tools-set-executor!`. A listener that raises during a registration rolls it back. |
 
 ## Plugins
 
@@ -443,7 +446,7 @@ Body, in order: validate `toolOrder` (a repeated name raises `toolOrder lists "<
 33. `pipeline-dispatch` dispatches `tools/execute` with the body step of rule 34 innermost, then: normalise the result (rule 36); prepend the contexts deferred by the body to the result's additional contexts; if the caller's cancel event is ready and the result is a success, replace it with the cancellation result (rule 40), keeping the contexts. Return `'post-result`. A raise from a listener gives `'final-result` with its error result.
 34. The body step (`pipeline.ts:263-293`): fuse the caller's cancel event with the one currently on the execution, which a listener may have replaced (`cancel-evt-any` with the listener's event first; when they are the same event use it as is). If the fused event is ready, return aborted-before-dispatch. Set the fused event on the execution. Look the tool up again (rule 28); none raises the tool not found error. Mark the body as invoked. Call the definition's `execute` with the arguments and the execution and wait for it; the pipeline never abandons a started body. Build the success result (rule 35); if the fused event became ready meanwhile, return the `ABORTED` result instead. On a raise: if the fused event is ready, the raised value has no harness identity, and it is `eq?` to the cancel reason or is an `exn:fail:abort`, the result is the error result of that value with info `AbortError` / `ABORTED`; otherwise its ordinary error result. Finally restore the listener's event on the execution.
 35. Success result (`pipeline.ts:545-575`): the body value must be lossless JSON (`value is not lossless JSON`); validate it against the output schema with path `value`; call `render` with the arguments and the value (`output.render failed: <message>` on a raise, `output.render returned non-lossless JSON`); call `presentation-meta` when declared (the same two messages with `output.presentationMeta`). Each failure raises the tool output error with that single violation, or with the schema violations. Mark the result as concluding the turn when the body called `tool-conclude-turn!`. `presentation-meta` runs for nested calls as well.
-36. Normalising a `tools/execute` result (`pipeline.ts:578-596`): a result this pipeline built for this execution is kept; a failure authored by a listener is rebuilt from its error, content, meta and contexts; a success authored by a listener is rebuilt through rule 35 from its value (the tool is looked up again; none raises tool not found), keeping its contexts. The pipeline recognises its own results by identity in a private weak table keyed by the result and holding the token.
+36. Normalising a `tools/execute` result (`pipeline.ts:578-596`): a result this pipeline built for this execution is kept; a failure authored by a listener is rebuilt from its error, content, meta and contexts; a success authored by a listener is rebuilt through rule 35 from its value (the tool is looked up again; none raises tool not found), keeping its contexts. The pipeline recognises its own results by identity in a weak table that the pipeline value holds, keyed by the result and holding the token.
 37. `pipeline-complete`: a `'final-result` outcome goes to rule 39. A `'post-result` outcome: call the captured `project-content` once (a result other than `#f` replaces the content); apply rule 38; if the caller's cancel event is ready and the result is a success, replace it with the cancellation result; rule 39. Any raise goes to rule 39 with its error result.
 38. Post-execute (`pipeline.ts:494-533`): dispatch `tools/post-execute`. `post-block`: a failure whose content is the feedback, whose message is the feedback's text blocks joined by a newline, other blocks rendered as `[<type> content]`, or `tool result blocked by post-execute policy` when that is empty, with the decision's info and only the decision's contexts. `post-accept` with a value: on a failed result raise `exn:fail:contract` `tools/post-execute cannot replace the value of a failed result`; otherwise rebuild through rule 35 (tool looked up again). `post-accept` with content: replace the content only. Additional contexts are the result's followed by the decision's.
 39. Finish (`pipeline.ts:381-426`): materialise the candidate, which means its content, meta, contexts and error must be lossless JSON; if that fails, materialise the error result of `tool result must be losslessly JSON-serializable`. Call the captured `finalize-content` exactly once; a result other than `#f` replaces the content; materialise again; if the finalizer or the second materialisation raises, the result is the error result of that raise and the finalizer is not called again. Close the execution to further changes, resolve the `tools/result` callbacks with `scoped-callbacks`, invoke them with containment, and return the result.
@@ -479,13 +482,13 @@ Body, in order: validate `toolOrder` (a repeated name raises `toolOrder lists "<
 - **One parameter list, two uses.** In dsh the schema is an object literal and the handler reads `args.name`; TypeScript inference ties them together. `define-tool` takes the parameters once and derives the JSON Schema, the validation and the handler's variable bindings from that list. The classes of error it removes: a handler reading an argument the schema does not declare (an unbound identifier at compile time instead of a silent `#f`); a schema property and its handler name drifting apart after a rename; a default applied in one callback and forgotten in another (`#:or` is stated once and used by every body form). `make-tool` is the same thing as a procedure, for definitions built at run time and for translated plugins.
 - **Author specs stay jvalues.** The node constructors return jobjects in the dsh author form, so a translated plugin can pass its literal object unchanged, the compiler has one input representation, and the error paths and messages are those of dsh.
 - **Structs and `match` for decisions and outcomes.** The tagged unions `PreToolDecision`, `PostToolDecision` and the stage results become structs. The invalid accept decision that dsh reports when it processes the decision is rejected by the constructor with the same message, which reaches the model through the same error-result path.
-- **Private execution state in the execution value.** The five `WeakMap` side tables keyed by execution become private fields of `tool-execution`. The table of results the pipeline built stays a weak table, because a listener can copy a result value.
+- **Private execution state in the execution value.** The five `WeakMap` side tables keyed by execution become private fields of `tool-execution`. The table of results the pipeline built stays a weak table, held by the pipeline value, because a listener can copy a result value.
 - **Cancel events for `AbortSignal`.** A cancel event is an `evt`, so "wait for the work or for cancellation" is one `await` over a `choice-evt`. Signal fusion is `cancel-evt-any`. A tool body is never killed or broken by the pipeline; it observes the event and returns.
 - **Generics for seams.** `gen:tool-executor` has two providers in dsh (native and PTC). `gen:tool-approval` lets this package call a service whose definition lives in a later package.
 - **Batch pool on tasks.** Dispatches run as tasks; each fills its slot when it finishes and then adds its index to a completion queue. The scheduler removes one index per iteration, which reproduces the `Promise.race` loop of dsh, including when a slot of a finished dispatch is committed relative to the next `tool/call` append. A `choice-evt` over several finished tasks would pick at random.
 - **Registry storage returns snapshots.** `named-entries` and `anonymous-entries` return lists; the JavaScript versions hand out live iterators. No reader in the covered packages adds entries while it iterates.
 - **The batch log names the session.** dsh reads `agent.session`; this package cannot see the agent's fields, so `tool-batch-log` carries the session.
-- **Racket-only additions**, for the coordinator's ADR list: `dsh-tools/cancel` as the home of cancel sources and `exn:fail:abort` (to be moved to `dsh-util` if that package wants them lower); `gen:tool-approval` defined here; `call-with-tool-cancel`; the `#:or` and `#:args` options of `define-tool`. No configuration key is added.
+- **Racket-only additions**, for the coordinator's ADR list: `gen:tool-approval` defined here; `call-with-tool-cancel`; the `#:or` and `#:args` options of `define-tool`. No configuration key is added.
 
 ## Work units
 
@@ -493,8 +496,8 @@ The package is split into three units. The interface between them is the set of 
 
 | Unit | Modules | Depends on |
 |---|---|---|
-| 1: scope, cancel, system prompt | `scope`, `cancel`, `system-prompt`, `plugin/system-prompt` and their tests | `dsh-session/scope-core`, `cordis`, `cordis-schema` |
-| 2: schemas and tool data | `errors`, `json-schema`, `schema`, `tool` (data, `make-tool`, `make-raw-tool`, `define-tool`), `presentation`, `approval` and their tests | `dsh-session/lossless`, `dsh-util` |
+| 1: scope, system prompt | `scope`, `cancel` (the re-export), `system-prompt`, `plugin/system-prompt` and their tests | `dsh-session/scope-core`, `dsh-llm/cancel`, `cordis`, `cordis-schema` |
+| 2: schemas and tool data | `errors`, `json-schema`, `schema`, `tool` (data, `make-tool`, `make-raw-tool`, `define-tool`), `presentation`, `approval` and their tests | `dsh-session/lossless`, `dsh-session/types` (for `absent`), `dsh-util` |
 | 3: registry and execution | `tools`, `pipeline`, `executor-native`, `plugin/tools`, `plugin/tool-executor-native`, `plugin/agent-tool-presentation`, `plugins`, `main` and their tests | units 1 and 2, `dsh-session`, `dsh-llm` |
 
 Units 1 and 2 have no dependency on each other and can be built at the same time. Unit 3 starts when both export their modules; it can be written against this document before they are finished. Unit 2 owns `tool-execution` and the result structs, including the private fields and the constructor that unit 3 uses: `dsh-tools/private/execution` exports `(make-tool-execution input token arguments)`, `(tool-execution-state e)` (a mutable record with fields `deferred-contexts`, `concluded?`, `body-invoked?`, `caller-cancel`, `finalizer`, `projector`, `closed?`) and `(close-tool-execution! e)`.
@@ -506,7 +509,7 @@ Tests live in `racket/dsh-tools/tests/`. Rows name the TypeScript suite to mirro
 | Racket test file | Mirrors | Pins |
 |---|---|---|
 | `scope-test.rkt` | `packages/core/scope/tests/scope.spec.ts`, `store.spec.ts` | rules 1 to 4; disposal of a scope removes registrations made through it |
-| `cancel-test.rkt` | the signal cases of `packages/core/tools/tests/execution-signal-types.spec.ts` | the cancel API, reason identity, `cancel-evt-any` order |
+| `cancel-test.rkt` | the signal cases of `packages/core/tools/tests/execution-signal-types.spec.ts` | `dsh-tools/cancel` exports the bindings of `dsh-llm/cancel` (`eq?` procedures); reason identity and `cancel-evt-any` order as the pipeline uses them. The cancel API itself is tested in `dsh-llm` |
 | `json-schema-test.rkt` | `packages/core/tools/tests/json-schema.spec.ts`, `properties.spec.ts` | rules 8 and 9, every message; validation is total on generated values |
 | `schema-test.rkt` | `packages/core/tools/tests/schema.spec.ts` | rules 5 to 7 and 10 to 16, including output key order and `define-tool` syntax errors |
 | `system-prompt-test.rkt` | `packages/core/system-prompt/tests/system-prompt.spec.ts`, `scoped.spec.ts`, `tool-order.spec.ts` | rules 50 to 55, every interpolation message, config validation at load, rollback on a raising change listener |
@@ -522,7 +525,7 @@ Acceptance gate: `raco test racket/dsh-tools` passes with no network; every numb
 ## Open questions
 
 1. **Kernel support for resolving listeners.** Rule 39 and `dsh-session` need `scoped-callbacks`, which needs a kernel procedure that returns the filtered listener list without calling it. Recommended default: as in [dsh-session.md](dsh-session.md), open question 1.
-2. **Home of cancellation values.** `dsh-llm/adapter-kit` has its own `cancelled?` and `check-cancel!` (the latter raises an `exn:fail:llm` with code `ABORTED`, which rule 34 leaves unchanged because it has a harness identity). Rule 34 recognises as an unclassified cancellation only the cancel reason itself and `exn:fail:abort` from this package. Recommended default: implement `dsh-tools/cancel` as specified; if `dsh-util` exports bindings with these names when work starts, re-export them instead, so that there is one `exn:fail:abort` and one `cancelled?`.
+2. **Home of cancellation values.** Settled in the wave 3 review: the values live in `dsh-llm/cancel` and `dsh-tools/cancel` re-exports them, so there is one `exn:fail:abort` and one `cancelled?` (which also accepts `#f`). `dsh-llm/adapter-kit` keeps `check-cancel!`, which raises an `exn:fail:llm` with code `ABORTED`; rule 34 leaves that failure unchanged because it has a harness identity, and recognises as an unclassified cancellation only the cancel reason itself and `exn:fail:abort`. If `dsh-util` later wants these values lower, `dsh-llm/cancel` becomes the re-export.
 3. **Fields of `exn:fail:harness`.** A failed tool result persists `{name, code}`, where `name` is the dsh error class name (`ToolArgsError`, `LlmError`, …). This contract therefore assumes that `exn:fail:harness` carries that name as well as the code, with accessors for both, and allows substructs. `dsh-llm.md` assumes only the code accessor. Recommended default: `dsh-util` gives the struct a `name` field that each substruct's constructor sets; this package builds every error through `dsh-tools/errors` and reads identity only through `harness-error-info`, so a different field layout changes one module. If the struct has no name, `harness-error-info` maps this package's own substructs to their names and reports any other harness error under the name `HarnessError`.
 4. **The config schema for removed keys.** dsh uses Schemastery `never`. Recommended default: use the `cordis-schema` counterpart if it exists; otherwise wrap the object schema in a procedure that raises the kernel's validation error (`invalid config:` …) when `mode` or `maxParallelSubCalls` is present.
 5. **Parameter names that are integer strings.** JavaScript would order a parameter named `"0"` before the others; a jobject keeps the written order. No dsh tool has such a parameter. Recommended default: `define-tool` and `parameters` reject a name that is a canonical non-negative integer string, with an error that states this reason.

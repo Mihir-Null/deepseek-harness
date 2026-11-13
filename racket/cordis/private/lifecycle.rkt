@@ -26,9 +26,10 @@
 ;; ---------------------------------------------------------------------------------------
 ;; Public views of a fiber
 
+;; The fiber's inject table itself: an `internal/plugin` observer adds a dependency by
+;; storing a key in it before the fiber's dependencies are resolved.
 (define (fiber-inject f)
-  (for/hasheq ([p (in-list (fiber-injects f))])
-    (values (car p) (cdr p))))
+  (fiber-inject-table f))
 
 (define (fiber-committed f)
   (define c (fiber-commit f))
@@ -71,12 +72,14 @@
   (define ok?
     (and i
          (or (not (impl-check i))
+             ;; the check runs with breaks off: it is consulted in the middle of a
+             ;; notification that must reach every dependent
              (with-handlers ([(lambda (e) #t)
                               (lambda (e)
                                 (contain e (lambda (e)
                                              (log-fiber-error (context-fiber (impl-ctx i)) e)))
                                 #f)])
-               (and (call-user (lambda () ((impl-check i) (fiber-ctx f)))) #t)))))
+               (and ((impl-check i) (fiber-ctx f)) #t)))))
   (set-fiber-available!
    f (if ok?
          (hash-set (fiber-available f) key i)
@@ -115,7 +118,7 @@
       (define updated?
         (for/fold ([updated? #f]) ([key (in-list keys)])
           (cond
-            [(and (assq key (fiber-injects f)) (concerned? (fiber-ctx f) key))
+            [(and (fiber-injects? f key) (concerned? (fiber-ctx f) key))
              (check-impl! f key)
              #t]
             [else updated?])))
@@ -123,7 +126,8 @@
   (for ([key (in-list keys)])
     (define i (get-impl ctx key #f))
     (dispatch-emit ctx 'internal/service (list key (and i (impl-value i)))
-                   #:filter (lambda (c) (concerned? c key)))))
+                   #:filter (lambda (c) (concerned? c key))
+                   #:atomic? #t)))
 
 ;; ---------------------------------------------------------------------------------------
 ;; State machine
@@ -142,7 +146,7 @@
   (define new (or (change) (stable-state f)))
   (set-fiber-state! f new)
   (unless (eq? old new)
-    (dispatch-emit (fiber-ctx f) 'internal/status (list f old))
+    (dispatch-emit (fiber-ctx f) 'internal/status (list f old) #:atomic? #t)
     (when (or (eq? old 'active) (eq? new 'active))
       (define store (kernel-store (fiber-kernel f)))
       (for ([i (in-list (fiber-provided f))])
@@ -184,9 +188,38 @@
     (if pctx
         (fiber-custodian (context-fiber pctx))
         (kernel-custodian (fiber-kernel f))))
+  (set-fiber-custodian-parent! f parent)
   ;; a parent that was already shut down stands in for the child's custodian
   (with-handlers ([exn:fail? (lambda (e) parent)])
     (make-custodian parent)))
+
+;; Ends the activation's custodian. A task that belongs to it and waits for this fiber, or
+;; for a fiber up the chain whose teardown this unload is part of, is first handed to the
+;; parent custodian: it waits for the outcome of the unload and gets to see it.
+(define (shutdown-activation-custodian! f)
+  (define c (fiber-own-custodian f))
+  (when c
+    (define home (fiber-custodian-parent f))
+    (unless (or (custodian-shut-down? c) (custodian-shut-down? home))
+      (define managed #f)
+      ;; this fiber, then each fiber up the chain of creating contexts
+      (let loop ([a f])
+        (define waiting (fiber-waiting a))
+        (for ([th (in-list (hash-keys waiting))])
+          (cond
+            [(thread-dead? th) (hash-remove! waiting th)]
+            [else
+             (unless managed
+               (set! managed (custodian-managed-list c (kernel-custodian (fiber-kernel f)))))
+             (when (memq th managed)
+               (thread-resume th home))]))
+        (define pctx (fiber-parent-ctx a))
+        (when pctx
+          (define pf (context-fiber pctx))
+          (unless (eq? pf a) (loop pf)))))
+    (custodian-shutdown-all c)
+    (when (fiber-uid f)
+      (set-fiber-own-custodian! f (make-activation-custodian f)))))
 
 ;; Reload. Runs in the triggering task up to the point where the body would start: the
 ;; providers are committed and learn of their new dependent at once.
@@ -274,10 +307,7 @@
   (for ([t (in-list tasks)])
     (task-wait t))
   ;; inverses restored the context; the custodian reclaims what they did not name
-  (when (fiber-own-custodian f)
-    (custodian-shutdown-all (fiber-own-custodian f))
-    (when (fiber-uid f)
-      (set-fiber-own-custodian! f (make-activation-custodian f))))
+  (shutdown-activation-custodian! f)
   ;; let go of the providers and wake those that wait for their last dependent
   (define commit (or (fiber-commit f) (hasheq)))
   (for ([key (in-list (fiber-inject-keys f))])
@@ -341,9 +371,11 @@
         (map (lambda (q) (if (eq? (car q) (car p)) p q)) acc)
         (cons p acc))))
 
-(define (make-root-fiber k root-custodian)
-  (fiber k 0 #f #f 0 #f #f '() #f #f 'active #f 0 0 '(0) (hasheq) (hasheq) 0 '() #f
-         (make-dlist) '() #f root-custodian #f (make-hasheq)))
+;; The root fiber has no custodian of its own: what runs through a root context belongs to
+;; the kernel custodian and lives until `context-shutdown!`.
+(define (make-root-fiber k)
+  (fiber k 0 #f #f 0 #f #f (make-hasheq) '() #f #f 'active #f 0 0 '(0) (hasheq) (hasheq) 0
+         '() #f (make-dlist) '() #f #f #f (make-hasheq) #f (make-hasheq)))
 
 (define (get-runtime! k pl)
   (or (hash-ref (kernel-runtimes k) (plugin-key pl) #f)
@@ -378,8 +410,10 @@
    (set-kernel-fiber-counter! k (add1 (kernel-fiber-counter k)))
    (set-kernel-fiber-seq! k (add1 (kernel-fiber-seq k)))
    (define f
-     (fiber k (kernel-fiber-seq k) pl rt (kernel-fiber-counter k) #f ctx injects config #f
-            'pending #f 0 0 #f (hasheq) #f 0 '() #f (make-dlist) '() #f #f #f (make-hasheq)))
+     (fiber k (kernel-fiber-seq k) pl rt (kernel-fiber-counter k) #f ctx
+            (make-hasheq injects) (map car injects) config #f
+            'pending #f 0 0 #f (hasheq) #f 0 '() #f (make-dlist) '() #f #f #f (make-hasheq)
+            #f (make-hasheq)))
    ;; the plugin's own interception config is the innermost layer of its context
    (set-fiber-ctx! f (context-derive ctx #:fiber f #:intercepts (filter cdr injects)))
    ;; The fiber is an effect of the fiber it was created on. Its inverses run newest first:
@@ -392,9 +426,10 @@
        (ctx-effect* ctx
                     (lambda ()
                       (dlist-push! (runtime-fibers rt) f)
-                      (list (lambda () f)
-                            (lambda () (begin-dispose! f))))
-                    "ctx.plugin()")))
+                      (list (kernel-inverse (lambda () f))
+                            (kernel-inverse (lambda () (begin-dispose! f)))))
+                    "ctx.plugin()"
+                    #:kernel? #t)))
    (set-fiber-dispose-proc! f d)
    (when (eq? (plugin-custodian-mode pl) 'own)
      (set-fiber-own-custodian! f (make-activation-custodian f)))
@@ -437,7 +472,8 @@
    (fiber-ctx f)
    (lambda ()
      (cond
-       [(fiber-dispose-proc f) => (lambda (d) (dispose! d))]
+       [(fiber-dispose-proc f)
+        => (lambda (d) (call-as-waiter f (lambda () (dispose! d))))]
        ;; disposing the root fiber unloads everything registered through the root
        [else (fiber-restart! f)])
      (void))))

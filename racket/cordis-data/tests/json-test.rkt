@@ -66,6 +66,24 @@
   (reads-as "1e-99999999999999999999" 0.0)
   (reads-as "0e99999999999999999999" 0.0))
 
+(test-case "decimal texts of any length round to the nearest double, ties to even"
+  ;; Exactly halfway between 1 and the next double.
+  (define midpoint "1.00000000000000011102230246251565404236316680908203125")
+  (check-eqv? (string->jvalue midpoint) 1.0)
+  (check-eqv? (string->jvalue (string-append midpoint "1")) 1.0000000000000002)
+  (check-eqv? (string->jvalue (string-append midpoint (make-string 2000 #\0))) 1.0)
+  (check-eqv? (string->jvalue (string-append midpoint (make-string 2000 #\0) "1"))
+              1.0000000000000002)
+  ;; Halfway between the next two doubles, where the even neighbour is the upper one.
+  (check-eqv? (string->jvalue "1.00000000000000033306690738754696212708950042724609375")
+              1.0000000000000004)
+  (check-eqv? (string->jvalue (string-append "0." (make-string 5000 #\0) "1")) 0.0)
+  (check-eqv? (string->jvalue (string-append "0." (make-string 5000 #\0) "1e5001")) 1.0)
+  (check-eqv? (string->jvalue (string-append "1" (make-string 5000 #\0) "e-5000")) 1.0)
+  (check-eqv? (string->jvalue (string-append "1" (make-string 400 #\0) ".0")) +inf.0)
+  (check-eqv? (string->jvalue (string-append "0." (make-string 3000 #\7))) 0.7777777777777778)
+  (check-eqv? (string->jvalue (string-append (make-string 30 #\9) ".5")) 1e30))
+
 (test-case "whitespace is space, tab, line feed and carriage return only"
   (check-equal? (string->jvalue " \t\n\r[ 1 ,\n2 ]\r\n") '(1 2))
   (check-equal? (string->jvalue "{ \"a\" : 1 , \"b\" : [ ] }") (jobject 'a 1 'b '()))
@@ -91,7 +109,8 @@
   (check-equal? (string->jvalue "\"\\udc00\"") replacement)
   (check-equal? (string->jvalue "\"a\\ud83dz\"") (string-append "a" replacement "z"))
   (check-equal? (string->jvalue "\"\\ud83d\\u0041\"") (string-append replacement "A"))
-  (check-equal? (string->jvalue "\"\\ud83d\\ud83d\\ude00\"") (string-append replacement grinning-face))
+  (check-equal? (string->jvalue "\"\\ud83d\\ud83d\\ude00\"")
+                (string-append replacement grinning-face))
   (check-equal? (string->jvalue "\"\\ude00\\ud83d\"") (string-append replacement replacement))
   (check-equal? (string->jvalue "\"\\ud83d\\n\"") (string-append replacement "\n")))
 
@@ -149,8 +168,9 @@
 
 (test-case "bytes->jvalue decodes UTF-8 as JavaScript does"
   (check-equal? (bytes->jvalue #"{\"k\":[1,2.5,\"x\"]}") (jobject 'k (list 1 2.5 "x")))
-  (check-equal? (bytes->jvalue (string->bytes/utf-8 (string-append "[\"" e-acute grinning-face "\"]")))
-                (list (string-append e-acute grinning-face)))
+  (define accented (string-append e-acute grinning-face))
+  (check-equal? (bytes->jvalue (string->bytes/utf-8 (string-append "[\"" accented "\"]")))
+                (list accented))
   ;; An invalid byte, and a sequence cut short, each decode to one U+FFFD.
   (check-equal? (bytes->jvalue #"\"a\377b\"") (string-append "a" replacement "b"))
   (check-equal? (bytes->jvalue #"\"\342\202\"") replacement)
@@ -357,7 +377,8 @@
                                "    ]\n"
                                "  ]\n"
                                "}"))
-  (check-equal? (jvalue->string (jobject 'k (list 1 2)) #:indent 1) "{\n \"k\": [\n  1,\n  2\n ]\n}")
+  (check-equal? (jvalue->string (jobject 'k (list 1 2)) #:indent 1)
+                "{\n \"k\": [\n  1,\n  2\n ]\n}")
   (check-equal? (jvalue->string (list (jobject 'k 1)) #:indent 4)
                 "[\n    {\n        \"k\": 1\n    }\n]")
   (check-equal? (jvalue->string (list 1) #:indent 10) "[\n          1\n]")
@@ -372,13 +393,15 @@
   (for ([bad (in-list (list 0 11 -1 2.0 "  " #t))])
     (check-exn exn:fail:contract? (lambda () (jvalue->string '(1) #:indent bad)))
     (check-exn exn:fail:contract? (lambda () (jvalue->bytes '(1) #:indent bad)))
-    (check-exn exn:fail:contract? (lambda () (write-jvalue '(1) (open-output-string) #:indent bad)))))
+    (check-exn exn:fail:contract?
+               (lambda () (write-jvalue '(1) (open-output-string) #:indent bad)))))
 
 (test-case "jvalue->bytes and write-jvalue produce the same text"
   (define doc (jobject 'name (string-append e-acute grinning-face) 'n (list 1 2.5)))
   (define text (jvalue->string doc))
   (check-equal? (jvalue->bytes doc) (string->bytes/utf-8 text))
-  (check-equal? (jvalue->bytes doc #:indent 3) (string->bytes/utf-8 (jvalue->string doc #:indent 3)))
+  (check-equal? (jvalue->bytes doc #:indent 3)
+                (string->bytes/utf-8 (jvalue->string doc #:indent 3)))
   (check-equal? (bytes->jvalue (jvalue->bytes doc)) doc)
   (define out (open-output-string))
   (check-true (void? (write-jvalue doc out)))
@@ -393,7 +416,8 @@
 (test-case "a hash is written as an object with its keys in symbol<? order"
   (check-equal? (jvalue->string (hash 'b 1 'a (hash "d" 2 "c" (list (hasheq 'z 0 'y 1)))))
                 "{\"a\":{\"c\":[{\"y\":1,\"z\":0}],\"d\":2},\"b\":1}")
-  (check-equal? (jvalue->string (jobject 'outer (make-hasheq '((k . "v"))))) "{\"outer\":{\"k\":\"v\"}}"))
+  (check-equal? (jvalue->string (jobject 'outer (make-hasheq '((k . "v")))))
+                "{\"outer\":{\"k\":\"v\"}}"))
 
 (test-case "a value that is not a jvalue raises exn:fail:contract"
   (for ([bad (in-list (list (void) 'symbol #\a (vector 1) car (cons 1 2) #"bytes" 1+2i

@@ -89,3 +89,38 @@ Structural equality over jvalues. Objects compare as maps regardless of key orde
 ## 5. Tests
 
 `raco test racket/cordis-data` covers every bullet above, including: key order through read, update and write; round trips of the number cases listed; escaping; indentation layouts; equality ignoring order; the match expander; and the length helpers on strings with astral characters. A table of at least 60 `(value . expected-text)` pairs generated from Node (`node -e` with `JSON.stringify`) is checked in as test data together with the script that produced it, so the suite itself needs no Node.
+
+## 6. Choices the implementation makes
+
+Sections 1 to 5 leave these points open; `racket/cordis-data` settles them as follows, and its tests pin each one.
+
+Values:
+
+- `(jvalue? v)` accepts a hash with symbol or string keys wherever an object may appear, because every reader of jvalues does. It accepts exact rationals and rejects NaN, the infinities and `(void)`.
+- Storing `(void)` raises `exn:fail:contract` in `jobject`, `jobj`, `make-jobject`, `jset`, `jset*`, `jupdate` and `jmap`, and when a hash that holds it is read as an object. A jobject may hold any other Racket value; only `jvalue?`, the writers and the jsexpr converters look inside.
+- A hash that holds the same key as a symbol and as a string raises `exn:fail:contract` when it is read as a whole object. `jref` and `jhas?` on a hash look up the symbol first, then the string.
+- `jref*` treats a step that does not apply (a key into an array or scalar, an index into an object, an index past the end) as missing. Its default may be a procedure, as for `jref`.
+- `jset*` creates an object for a missing key step and an array for a missing index step. An index equal to the length appends; a larger index pads with `'null`, as `JSON.stringify` shows the holes JavaScript would leave. A step into an existing value of the wrong kind, `'null` included, raises `exn:fail:contract`.
+- `jmerge-deep` and `jsexpr->jvalue` return jobjects for hashes they are given; `jsexpr->jvalue` keeps the key order of jobjects already inside its argument.
+- `jobj-pat` also accepts a string literal as a key (`["$ref" pat]`), any pattern after `#:rest`, and a hash as the matched value.
+- Printing a jobject writes members that are not jvalues with `write` (a hash prints as a hash), so printing never raises.
+
+JSON text:
+
+- Object keys stay in the order of the text. JavaScript moves keys that are array indexes (`"0"`, `"42"`) to the front in numeric order; a jobject does not, so for an object with such keys the written order differs from `JSON.stringify(JSON.parse(text))`.
+- The readers keep an integer of any size exact. A number with a fraction or exponent that exceeds the double range reads as `+inf.0` or `-inf.0`, as `JSON.parse` yields `Infinity`.
+- The writers round an exact integer with a magnitude above 2^53 to the nearest double before printing, so that writing what was read gives the text `JSON.stringify(JSON.parse(text))` gives: `9007199254740993` is written as `9007199254740992`, `(expt 10 21)` as `1e+21`, and an integer beyond the double range as `null`. `js-number->string` rounds the same way and returns `"NaN"`, `"Infinity"` or `"-Infinity"` for those values.
+- When two shortest digit strings are equally close to a double, the even one is written, as `Number::toString` requires (`88.114288330078125` is written as `88.11428833007812`).
+- `indent` is `#f` or an exact integer from 1 to 10; anything else, 0 included, raises `exn:fail:contract`.
+- The writers build the whole text before writing, so `write-jvalue` writes nothing when it raises. The error message for a nested value that is not a jvalue names its path.
+- `exn:fail:json-position` is 0-based and counts characters. For `bytes->jvalue` it indexes the decoded text; for `read-jvalue` it counts from where the call began reading, leading whitespace included.
+- `bytes->jvalue` and `read-jvalue` decode UTF-8 as Node's `buffer.toString('utf8')` does: each maximal invalid sequence becomes one U+FFFD, and a byte order mark is a syntax error because `JSON.parse` rejects U+FEFF.
+- `read-jvalue` finds the end of a value from its brackets and string quotes and then parses those bytes. A number or literal ends at whitespace, a structural character or the end of input, so `1true` is one malformed value, and the call waits for the byte after a top-level number. After a syntax error the port is positioned after the malformed text.
+
+Equality:
+
+- `deep-equal?` compares values outside the jvalue model with `equal?`. NaN equals nothing, as in JavaScript.
+
+Text length units:
+
+- `utf16-substring` accepts `#f` as `end`. The functions that return a prefix or slice may return their argument itself when all of it fits.

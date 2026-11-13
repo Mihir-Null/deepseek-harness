@@ -14,9 +14,15 @@
          "core.rkt"
          "dlist.rkt")
 
-(provide disposer? dispose! disposer-label disposer-children disposer-owner
+(provide disposer? dispose! dispose-effect! disposer-label disposer-children disposer-owner
          ctx-effect ctx-effect* fiber-effects
+         (struct-out kernel-inverse)
          interpret-results run-user run-top-level!)
+
+;; An inverse that is kernel bookkeeping (remove a listener, withdraw a service). It runs
+;; with breaks off, like the setup that returned it, so that a break cannot leave a kernel
+;; table changed without its inverse or an inverse dropped without its change.
+(struct kernel-inverse (proc))
 
 (struct disposer
   (kernel
@@ -35,7 +41,7 @@
    [failure #:mutable]        ; box of the first value an inverse raised, or #f
    done-latch)                ; open once cleanup has finished
   #:property prop:procedure
-  (lambda (d) (dispose! d))
+  (lambda (d) (dispose-effect! d))
   #:property prop:evt
   (lambda (d) (wrap-evt (disposer-setup-latch d) (lambda (_) d)))
   #:property prop:awaitable
@@ -89,7 +95,7 @@
        (define rest (cdr stack))
        (cond
          [(or (void? item) (not item) (null? item)) (loop rest)]
-         [(disposer? item) (collect item) (loop rest)]
+         [(or (disposer? item) (kernel-inverse? item)) (collect item) (loop rest)]
          [(generator? item)
           (cond
             [(not (continue?)) 'done]
@@ -126,8 +132,9 @@
 (define (ctx-effect ctx thunk #:label [label "anonymous"])
   (call/kernel ctx (lambda () (ctx-effect* ctx thunk label))))
 
-;; As `ctx-effect`, for callers that already run in a kernel task.
-(define (ctx-effect* ctx thunk label)
+;; As `ctx-effect`, for callers that already run in a kernel task. With `kernel?` the thunk
+;; is kernel bookkeeping: it runs with breaks off and returns `kernel-inverse`s.
+(define (ctx-effect* ctx thunk label #:kernel? [kernel? #f])
   (critical
    (define f (context-fiber ctx))
    (unless (and (fiber-uid f) (not (eq? (fiber-state f) 'unloading)))
@@ -143,7 +150,11 @@
                       (lambda (e)
                         (setup-failed! d e #t)
                         (raise e))])
-       (interpret d (run-user ctx f (lambda () (call-with-values thunk list))) 'sync)))
+       (interpret d
+                  (if kernel?
+                      (call-with-values thunk list)
+                      (run-user ctx f (lambda () (call-with-values thunk list))))
+                  'sync)))
    (if (eq? outcome 'done)
        (setup-ok! d)
        (continue-setup! d (cdr outcome)))
@@ -211,24 +222,34 @@
 ;; Waiting for setup
 
 ;; Waits until setup has settled. If the thread that ran setup died first, setup counts as
-;; failed and what it collected is left for cleanup.
+;; failed and what it collected is left for cleanup. Call from a kernel task.
 (define (wait-setup! d)
   (let loop ()
     (when (eq? (disposer-setup d) 'running)
       (define w (disposer-setup-worker d))
       (cond
         [(thread-dead? w)
-         (set-disposer-setup! d (box (exn:fail:cordis:task-killed
-                                      (format "~a: setup was killed" (effect-name d))
-                                      (current-continuation-marks))))
+         (set-disposer-setup! d (box (setup-killed d)))
          (latch-open! (disposer-setup-latch d))]
         [else
          (call-user
           (lambda () (latch-wait (disposer-setup-latch d) (thread-dead-evt w))))
          (loop)]))))
 
+(define (setup-killed d)
+  (exn:fail:cordis:task-killed (format "~a: setup was killed" (effect-name d))
+                               (current-continuation-marks)))
+
+;; `await` on a disposer: the disposer once setup has settled; raises the setup failure.
+;; Changes nothing, so it may run on any thread.
 (define (await-setup d)
-  (wait-setup! d)
+  (let loop ()
+    (when (eq? (disposer-setup d) 'running)
+      (define w (disposer-setup-worker d))
+      (when (thread-dead? w)
+        (raise (setup-killed d)))
+      (latch-wait (disposer-setup-latch d) (thread-dead-evt w))
+      (loop)))
   (define s (disposer-setup d))
   (when (box? s) (raise (unbox s)))
   d)
@@ -239,6 +260,13 @@
 (define (start-cleanup! d)
   (set-disposer-cleanup! d 'running)
   (busy-add! (disposer-kernel d) (disposer-done-latch d)))
+
+;; The public entry: a disposer may be called from any thread. A finished one needs no
+;; kernel task.
+(define (dispose-effect! d)
+  (unless (and (disposer-released? d) (eq? (disposer-cleanup d) 'done))
+    (call/kernel (disposer-ctx d) (lambda () (dispose! d))))
+  (void))
 
 ;; Calling a disposer. The first call runs the collected inverses, newest first, each to
 ;; completion, after setup has settled; it raises the setup failure if setup failed after
@@ -276,11 +304,10 @@
 
 ;; Advances the cleanup in the current thread, which must hold the claim, until it is done,
 ;; and returns 'done. If another thread claims the cleanup while this one waits, this one
-;; joins it. With
-;; `detach?`, returns 'detached instead of waiting, after handing the rest to a kernel task.
-;; A break of the current thread, in an inverse or in a wait, hands the rest to a kernel
-;; task and is re-raised. Any other value an inverse raises is logged with the effect label
-;; and the remaining inverses still run.
+;; joins it. With `detach?`, returns 'detached instead of waiting, after handing the rest
+;; to a kernel task. A break of the current thread, in an inverse or in a wait, hands the
+;; rest to a kernel task and is re-raised. Any other value an inverse raises is logged with
+;; the effect label and the remaining inverses still run.
 (define (drive-cleanup! d detach?)
   (define me (current-thread))
   (let loop ()
@@ -313,22 +340,28 @@
                (loop)]))]
       [(pair? (disposer-inverses d))
        (define inv (car (disposer-inverses d)))
+       (define started? (box #f))
        (set-disposer-inverses! d (cdr (disposer-inverses d)))
        (guarded d
                 (lambda ()
-                  (define r (call-inverse d inv))
+                  (define r (call-inverse d inv started?))
                   (when (or (task? r) (fiber? r))
-                    (set-disposer-pending! d r))))
+                    (set-disposer-pending! d r)))
+                ;; an inverse that the break kept from starting is still due
+                (lambda ()
+                  (unless (unbox started?)
+                    (set-disposer-inverses! d (cons inv (disposer-inverses d))))))
        (loop)]
       [else
        (finish-cleanup! d)
        'done])))
 
-(define (guarded d thunk)
-  (with-handlers ([exn:break?
+(define (guarded d thunk [before-hand-over void])
+  (with-handlers ([own-break?
                    (lambda (e)
                      (when (and (eq? (disposer-worker d) (current-thread))
                                 (not (eq? (disposer-cleanup d) 'done)))
+                       (before-hand-over)
                        (hand-over! d))
                      (raise e))]
                   [(lambda (e) #t)
@@ -340,11 +373,19 @@
 
 ;; An inverse that is an effect disposer is disposed and joined. Another inverse is called;
 ;; when it returns a task or a fiber, the cleanup waits for that before the next inverse.
-(define (call-inverse d inv)
+;; `started?` is set once the inverse itself has begun to run. A child disposer never counts
+;; as started: calling it again later joins whatever it had begun.
+(define (call-inverse d inv started?)
   (cond
     [(disposer? inv) (dispose! inv) #f]
+    [(kernel-inverse? inv)
+     (set-box! started? #t)
+     (call-with-values (kernel-inverse-proc inv)
+                       (lambda vs (and (pair? vs) (car vs))))]
     [else
-     (call-with-values (lambda () (run-user (disposer-ctx d) (disposer-owner d) inv))
+     (call-with-values (lambda ()
+                         (run-user (disposer-ctx d) (disposer-owner d)
+                                   (lambda () (set-box! started? #t) (inv))))
                        (lambda vs (and (pair? vs) (car vs))))]))
 
 (define (settled? p)

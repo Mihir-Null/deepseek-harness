@@ -4,7 +4,7 @@ This is the binding interface for `racket/dsh-llm/`: the model-provider layer of
 
 Package: directory `racket/dsh-llm/`, collection `dsh-llm`, `info.rkt` with `(define collection "dsh-llm")`, `(define deps '("base" "cordis" "cordis-data" "cordis-schema" "dsh-util" "dsh-session"))`, `(define build-deps '("rackunit-lib"))`. It uses `racket/tcp`, `openssl`, `racket/generic`, `racket/generator`, `racket/match`, `file/sha1` and `net/base64` from the base distribution and no third-party package.
 
-Terms used throughout: *jvalue*, *jobject*, `jobj`, `jref`, `jset` come from [cordis-data](cordis-data.md); *task*, `await`, `blocking`, *effect*, *service handle*, `define-plugin`, `define-service`, `define-event` come from [cordis-kernel](cordis-kernel.md). `x` as a first argument always means "a context or a service handle" (ADR 0003). A *cancel evt* is a Racket `evt` that becomes ready when the caller gives up; it replaces `AbortSignal` (ADR 0002). `#f` for a cancel evt means "never cancelled".
+Terms used throughout: *jvalue*, *jobject*, `jobj`, `jref`, `jset` come from [cordis-data](cordis-data.md); *task*, `await`, `blocking`, *effect*, *service handle*, `define-plugin`, `define-service`, `define-event` come from [cordis-kernel](cordis-kernel.md). `x` as a first argument always means "a context or a service handle" (ADR 0003). A *cancel evt* is a Racket `evt` that becomes ready when the caller gives up and then stays ready; it replaces `AbortSignal` (ADR 0002). `#f` for a cancel evt means "never cancelled". Cancel evts, cancel sources and `exn:fail:abort` are defined once, in `dsh-llm/cancel` (Services, "Cancellation"), because this is the lowest package that takes a cancel evt; `dsh-tools/cancel` re-exports that module unchanged.
 
 ## Scope
 
@@ -33,7 +33,8 @@ Public modules. Each exports through `contract-out`.
 
 | Module | Provides |
 |---|---|
-| `dsh-llm` (`main.rkt`) | Re-exports `dsh-llm/messages`, `dsh-llm/errors`, `dsh-llm/stream`, `dsh-llm/llm`, `dsh-llm/content`, `dsh-llm/retry-policy`, `dsh-llm/attribution`. This is what a consumer of the `llm` service requires. |
+| `dsh-llm` (`main.rkt`) | Re-exports `dsh-llm/cancel`, `dsh-llm/messages`, `dsh-llm/errors`, `dsh-llm/stream`, `dsh-llm/llm`, `dsh-llm/content`, `dsh-llm/retry-policy`, `dsh-llm/attribution`. This is what a consumer of the `llm` service requires. |
+| `dsh-llm/cancel` | Cancel sources, cancel evts and `exn:fail:abort` (Services, "Cancellation"). It requires only `racket/base`, so it is the first module of this package to be delivered. |
 | `dsh-llm/jrecord` | `define-jrecord`, `define-junion` (Data, "Record declarations"). |
 | `dsh-llm/messages` | Content blocks, message sources, messages, request-only user input, tool schemas, stream chunks, finish reasons, token usage, replay envelope; the compact timed stream (accumulator, expansion, readers); the assembler. |
 | `dsh-llm/errors` | `exn:fail:llm`, failure records, the code table, `normalize-llm-failure`, the context-overflow and quota classifiers, `error-chain`. |
@@ -43,7 +44,7 @@ Public modules. Each exports through `contract-out`.
 | `dsh-llm/retry-policy` | `retry-policy` struct, `retry-policy-schema`, `resolve-retry-policy`, `retry-policy-key`, `retry-code-choices`. |
 | `dsh-llm/attribution` | `app-identity`, `user-agent`, `attribution-headers`, `normalize-api-key`, `assert-usable-api-key`. |
 | `dsh-llm/ports` | Generic interfaces for the services of later packages that this package consumes (Services, "Ports"). |
-| `dsh-llm/adapter-kit` | Helpers shared by wire adapters: the idle watchdog, cancel helpers, config reads through volatile references. |
+| `dsh-llm/adapter-kit` | Helpers shared by wire adapters: the idle watchdog, `check-cancel!`, config reads through volatile references. It re-exports `cancelled?` of `dsh-llm/cancel` and defines no predicate of its own. |
 | `dsh-llm/http` | The HTTP/1.1 client: streaming requests, proxy routing, TLS, redirect refusal, truncated-body detection. |
 | `dsh-llm/sse` | The incremental server-sent-events parser. |
 | `dsh-llm/deepseek` | Re-exports the submodules `deepseek/config` (shared config fields, `resolve-deepseek-options`), `deepseek/serialize`, `deepseek/translate`, `deepseek/transport` (error classifier), `deepseek/adapter` (`make-deepseek-adapter`), `deepseek/host` (`register-deepseek-provider!`, `make-model-listing-cache`), `deepseek/listing`, `deepseek/listed-catalog`, `deepseek/files`, `deepseek/image-tokens`. |
@@ -138,7 +139,9 @@ A message is a jobject with `id`, `role`, `content` (list of blocks), `source`; 
 | `(make-message partial #:id [id])` | `partial` (a jobject with `role`, `content`, `source` and no `id`) with `id` appended last |
 | `(make-request-user-input blocks)` | `role: "user"`, `content` (request-only: no `id`, no `source`) |
 
-Accessors: `(message-id m)`, `(message-role m)` (a string), `(message-content m)`, `(message-source m)`, `(message-tool-call-id m)`, `(message-error m [default #f])`. Predicates: `message?` (has string `id`, a known `role`, list `content`, jobject `source`), `request-message?` (a message or a request-only user input), `system-message?`, `developer-message?`, `user-message?`, `assistant-message?`, `tool-message?`. `(define-junion message #:tag role ("system" "developer" "user" "assistant" "tool"))` gives the closed `message-case`. Content rules per role are R6 Formats 1; constructors check only that `content` is a list of jobjects with a string `type`.
+Key order of developer and user messages. dsh `createDeveloperMessage` and `createUserMessage` spread their input first and add `role` and `id` after it (`message.ts:235-253`), so the logged order of `content` and `source` is the order of the caller's object literal. `make-developer-message` and `make-user-message` always write `content` before `source`, which is the order of every user message the loop and the testkits write. A producer whose dsh call site writes `source` first builds the message with `make-message` over a partial in that order, `(make-message (jobj [source s] [content blocks] [role "developer"]))`, which gives `source`, `content`, `role`, `id`. The one such producer in wave 3 is the loop's tool-registry `developer/message` (`packages/core/agent-loop/src/agent.ts:708`; recorded in `snapshots/session/dynamic-tool-updates/session.v4.jsonl`). A package that ports another producer checks the order of that producer's literal.
+
+Accessors: `(message-id m)`, `(message-role m)` (a string), `(message-content m)`, `(message-source m)`, `(message-tool-call-id m)`, `(message-error m [default #f])`. Predicates: `message?` (has string `id`, a known `role`, list `content`, jobject `source`), `request-message?` (a message or a request-only user input), `system-message?`, `developer-message?`, `user-message?`, `assistant-message?`, `tool-message?`. `(define-junion message #:tag role ("system" "developer" "user" "assistant" "tool"))` gives the closed `message-case`; the predicate that declaration generates is not exported, so the exported `message?` is the stricter one described here. Content rules per role are R6 Formats 1; constructors check only that `content` is a list of jobjects with a string `type`.
 
 ### Tool schemas and tool history
 
@@ -231,7 +234,7 @@ All jobjects, keys in the order listed, optional keys present only when defined.
 (prepared-call-stream pc request) -> chunk-stream?
 ```
 
-`prepared-call` accessors return: `config` a call config with defaults materialised; `retry-policy` a `retry-policy`; `context` `{contextWindow}` or `#f`; `input-modalities` a list of strings or `#f`; `system-prompt-update` and `tool-update` a string or `#f`; `adapter-defaults` a jobject with `reasoningEffort: #t` and `maxTokens: #t` each present only when the adapter, not the caller, supplied the value.
+`prepared-call` accessors return: `config` a call config with defaults materialised; `retry-policy` a `retry-policy`; `context` `{contextWindow}` or `#f`; `input-modalities` a list of strings or `#f`; `system-prompt-update` and `tool-update` a string or `#f`; `adapter-defaults` a jobject with `reasoningEffort: #t` and `maxTokens: #t`, in that key order, each present only when the adapter, not the caller, supplied the value. The loop writes this jobject into `request/header` unchanged, so the order is durable (`{"reasoningEffort":true,"maxTokens":true}` in recorded fixtures). A prepared call also keeps the context `llm-prepare-call` was called through; `prepared-call-stream` dispatches `llm/stream` on that context.
 
 ```racket
 (struct retry-policy (mode max-retries retryable-codes initial-delay-ms max-delay-ms jitter-ratio) #:transparent)
@@ -268,13 +271,46 @@ A token measurement is the jobject `{logRevision, baseline, surfaceDeltaTokens, 
 
 ### Replay entries and override documents (`dsh-llm/replay`)
 
-A replay entry is one of `{kind: "chunks", chunks}`, `{kind: "throw", chunks, message, code, accepted?}`, `{kind: "hang", readyFile?}`, each with that exact key set. An override document is a list of entries, or `{patches: [{at, entry}…]}`. A session script is `(struct session-script (recorded-id created-at entries primary?))`. A parsed fixture is `(struct session-fixture (id created-at inherited-event-count events))` with `events` a list of `session-event?` values of `dsh-session`.
+A replay entry is one of `{kind: "chunks", chunks}`, `{kind: "throw", chunks, message, code, accepted?}`, `{kind: "hang", readyFile?}`, each with that exact key set. An override document is a list of entries, or `{patches: [{at, entry}…]}`. A recorded session script is `(struct recorded-session-script (recorded-id created-at entries primary?))`; the name `session-script` belongs to the scripted-session format of `dsh-test-support/script`, which a test may require beside this module. A parsed fixture is `(struct session-fixture (id created-at inherited-event-count events))` with `events` a list of `session-event?` values of `dsh-session`.
 
 ### DeepSeek wire records
 
 The request body and SSE events are specified in Behaviour D with key orders. The upload index file and Files API objects are R6 Formats 8 unchanged. The replay envelope of this adapter is `{response: {kind: "deepseek-messages", version: 1, model}, blocks: [{type: "text"} | {type: "reasoning", signature?} | {type: "tool-call"}…]}`.
 
 ## Services
+
+### Cancellation (`dsh-llm/cancel`)
+
+```racket
+(make-cancel-source) -> cancel-source?              ; AbortController
+(cancel-source? v) -> boolean?
+(cancel-source-evt src) -> evt?                     ; AbortSignal
+(cancel! src [reason (make-abort-error)]) -> void?  ; the first call fixes the reason; later calls do nothing
+(cancelled? c) -> boolean?                          ; c : (or/c evt? #f); polls, never blocks; #f is never cancelled
+(cancel-reason c) -> any/c                          ; the reason, or #f when not cancelled
+(check-cancelled! c) -> void?                       ; raises the reason when cancelled (throwIfAborted)
+(cancel-evt-any c ...) -> evt?                      ; ready when any argument is; #f arguments are ignored; the reason is that of the first ready argument in argument order
+never-cancelled                                     ; never-evt
+(struct exn:fail:abort exn:fail ())                 ; the counterpart of an Error named AbortError
+(make-abort-error [message "This operation was aborted"]) -> exn:fail:abort?
+```
+
+A cancel evt is any Racket `evt` that, once ready, stays ready; its synchronization result is the abort reason. The reason is any value: an exception, or plain data such as the cancel cause jobject of `dsh-agent`. `check-cancelled!` raises the reason itself with `raise`. These procedures touch no harness state and may be called from any thread. The module has no dsh counterpart as a package; it is the Racket form of `AbortController`, `AbortSignal`, `AbortSignal.any` and `throwIfAborted`.
+
+Two checks exist on purpose and must not be confused. `check-cancelled!` (this module) raises the caller's reason and is what the loop and the tool pipeline use. `check-cancel!` (`dsh-llm/adapter-kit`) raises an `exn:fail:llm` with code `ABORTED` and is what the runtime and the adapters use, because a model call reports cancellation as a coded failure.
+
+### Waiting and cancellation in this package
+
+Every procedure that can wait says how it is cancelled:
+
+- `llm-discover-models`, `llm-remote-discover-models`, `llm-resolve-model-info`, `llm-resolve-call-config`, `llm-prepare-call`: the `#:cancel` evt; they raise code `ABORTED`.
+- `llm-stream`, `prepared-call-stream` and every `chunk-stream-next!` on their results: `(llm-request-cancel request)`, and closing the stream, which shuts down the producer's custodian.
+- `deepseek-extensions-prepare`: the `cancel` field of the `extension-request`.
+- `http-request`: `#:cancel`; body reads: the `await-evt` argument.
+- The retry recovery of `make-retry-recovery`: the `cancel` of the payload and the plugin's disposal.
+- Replay and mock playback: the request's cancel evt.
+- `attachment-read-image-request`: its `cancel` argument.
+- `llm-list-models`, `projection-register!`, `credential-resolve`, `account-resolve-token`, `install-llm-replay!` and `load-session-scripts` take no cancel evt, as their dsh counterparts take no signal. They are cancelled only by a break delivered to the calling task, which propagates from the wait (cordis-kernel section 2 rule 4); they hold nothing across the wait that the caller's custodian does not reclaim.
 
 ### Streams (`dsh-llm/stream`)
 
@@ -417,6 +453,8 @@ This package is built before the packages that provide `attachments`, `fs`, `cre
   (account-reject-token! account-port token))                             ; -> void?
 (define-generics inventory-port
   (active-plugin-packages inventory-port session-id))                     ; -> (listof (cons/c string? (or/c string? #f)))
+(define-generics settings-port
+  (settings-configure! settings-port ctx options))                        ; options : jobject?; -> an effect result (cordis-kernel section 4)
 (struct projection-definition (key state-version init apply view summary?))
 (define-generics projection-port
   (projection-register! projection-port ctx definition)                   ; -> a handle; an effect on ctx; returns once registered
@@ -424,9 +462,11 @@ This package is built before the packages that provide `attachments`, `fs`, `cre
 (port-get ctx key pred) -> any/c
 ```
 
-`(port-get ctx key pred)` is `(ctx-get ctx key)`; it returns `#f` when the service is absent and raises `exn:fail:contract` naming the key and the interface when a value is mounted that does not satisfy `pred`. Keys: `attachments` (`attachment-port?`), `fs` (`host-path-port?`), `credentials` (`credential-port?`), `deepseekAccount` (`account-port?`), `loader` (`inventory-port?`), `sessionProjections` (`projection-port?`). All are optional reads except where a plugin injects them.
+`(port-get ctx key pred)` is `(ctx-get ctx key)`; it returns `#f` when the service is absent and raises `exn:fail:contract` naming the key and the interface when a value is mounted that does not satisfy `pred`. Keys: `attachments` (`attachment-port?`), `fs` (`host-path-port?`), `credentials` (`credential-port?`), `deepseekAccount` (`account-port?`), `loader` (`inventory-port?`), `sessionProjections` (`projection-port?`), `settings` (`settings-port?`). All are optional reads except where a plugin injects them.
 
-A `projection-definition` has `key` (string), `state-version` (exact non-negative integer), `init : (-> jobject? exact-nonnegative-integer? jvalue?)` (session header, inherited event count), `apply : (-> jvalue? session-event? jvalue?)`, `view : (or/c #f (-> jvalue? jvalue?))` (the wire view) and `summary?` (whether the view is part of session summaries). The projection registry is dsh's `packages/session/session-projection`; no wave 3 contract published so far defines it, so this package consumes it through the port and whichever package provides `sessionProjections` implements the port on its service value (Open question 1). Session access (`session-append!`, `session-event` accessors, `derive-event-message`, `canonical-header`, `header-equal?`, `surface-event-types`) comes from `dsh-session` directly; the launch environment and the Harness home come from `dsh-util` (Open question 6).
+Settings opt-out. dsh's DeepSeek host and its pi-ai plugin tell the settings service not to manage their loader entry automatically: `ctx.inject(['settings'], child => child.effect(() => child.settings.configure({ auto: false }, ctx.fiber)))` (`llm-deepseek/src/host.ts:47`, `llm-pi-ai/src/index.ts:175`). `register-deepseek-provider!` and the body of the `llm-pi-ai` plugin do the same: `(ctx-inject ctx '(settings) (lambda (child) (ctx-effect child (lambda () (settings-configure! (port-get child 'settings settings-port?) ctx (jobj [auto #f]))))))`. Without a `settings` service the child fiber stays pending and nothing else changes. `settings-configure!` takes the plugin's context where dsh passes its fiber; the provider reads the loader entry from it. `gen:settings-port` is defined here because this is the lowest package that calls it; `dsh-agent/ports` re-exports it for the default-model plugin, which makes the same call.
+
+A `projection-definition` has `key` (string), `state-version` (exact non-negative integer), `init : (-> jobject? exact-nonnegative-integer? jvalue?)` (session header, inherited event count), `apply : (-> jvalue? session-event? jvalue?)`, `view : (or/c #f (-> jvalue? jvalue?))` (the wire view) and `summary?` (whether the view is part of session summaries). The projection registry is dsh's `packages/session/session-projection` (wave 4). This package consumes it only through the port. In wave 3 the provider of `sessionProjections` is the plugin `racket:session-projections` of `dsh-agent` (`dsh-agent/projections`, [dsh-agent.md](dsh-agent.md) rules 68 and 69), whose service value implements `gen:projection-port`; `dsh-session-store` replaces it in wave 4 with a value that implements the same interface. `projection-register!` waits until the registration is usable and returns an opaque handle. The registration is an effect on `ctx` and is released when that fiber unloads; the port has no separate release operation, and a handle stays readable with `projection-state` after its registration was released. dsh's `handle.dispose()` and `handle.readerFor(session)` have no counterpart: no wave 3 consumer releases a projection before its fiber unloads, and a reader is `(lambda () (projection-state port handle session))`. Session access (`session-append!`, `session-event` accessors, `derive-event-message`, `canonical-header`, `header-equal?`, `surface-event-types`) comes from `dsh-session` directly; the launch environment and the Harness home come from `dsh-util` (Open question 6).
 
 ### Library interfaces (no service key)
 
@@ -493,7 +533,7 @@ retry-code-choices                                                     ; (listof
 `dsh-llm/adapter-kit`:
 
 ```racket
-(cancelled? cancel) -> boolean?                                        ; cancel is ready now
+cancelled?                                                             ; re-export of dsh-llm/cancel: (cancelled? c), c an evt or #f
 (check-cancel! cancel) -> void?                                        ; raises exn:fail:llm ABORTED "This operation was aborted"
 (make-idle-watchdog timeout-ms cancel) -> idle-watchdog?
 (watchdog-arm! w) (watchdog-pulse! w) (watchdog-disarm! w) -> void?
@@ -573,7 +613,7 @@ llm-retry-projection                                                   ; the llm
 (parse-session-fixture text #:decode [decode decode-current-session-fixture]) -> session-fixture?
 (derive-replay-script events) -> (listof jobject?)
 (read-override-doc jvalue file) -> (or/c (listof jobject?) (listof (cons/c exact-nonnegative-integer? jobject?)))
-(load-session-scripts config #:decode [decode …]) -> (listof session-script?)
+(load-session-scripts config #:decode [decode …]) -> (listof recorded-session-script?)
 (resolve-scripted-entry entry messages) -> jobject?
 (install-llm-replay! x config #:decode [decode …]) -> replay-handle?
 (replay-handle-dispose! h) -> void?
@@ -609,26 +649,28 @@ llm-retry-projection                                                   ; the llm
 
 ## Events
 
-Declared with `define-event` in the module that owns them.
+Declared with `define-event` in the module that owns them. As in the other wave 3 contracts, the Racket identifier of an event is its dsh name, so the generated bindings are `on-llm/stream`, `llm/stream-name`, `dispatch-llm/stream` and so on. The identifier `llm/stream` itself is not bound; `llm-stream` is the service procedure.
 
 ```racket
 ;; dsh-llm/llm
-(define-event llm-stream-event 'llm/stream
+(define-event llm/stream 'llm/stream
   #:mode waterfall #:args (llm-request?) #:result chunk-stream?)
-(define-event llm-adapters-updated 'llm/adapters-updated
+(define-event llm/adapters-updated 'llm/adapters-updated
   #:mode emit #:args ())
-(define-event llm-models-updated 'llm/models-updated
+(define-event llm/models-updated 'llm/models-updated
   #:mode emit #:args (string?))
 
 ;; dsh-llm/pi-ai
-(define-event pi-ai-request-headers 'llm-pi-ai/request-headers
+(define-event llm-pi-ai/request-headers 'llm-pi-ai/request-headers
   #:mode waterfall #:args (jobject? list?) #:result list?)
 ```
+
+`dsh-llm/llm` exports the `on-…` and `…-name` bindings of its three events and `dispatch-llm/models-updated`, which a model listing cache in another module calls. It does not export the dispatchers of `llm/stream` and `llm/adapters-updated`: only the runtime dispatches those.
 
 | dsh name | Mode | Arguments | Dispatched by, when | Guarantees |
 |---|---|---|---|---|
 | `llm/stream` | waterfall | `(request next)`; `next : (-> chunk-stream?)`; result a `chunk-stream` | `llm-stream` and `prepared-call-stream`, once per call, during that call | A listener calls `(next)` to delegate or returns its own stream to short-circuit. Adapter lookup happens only in the innermost step, so a listener can serve a request for an unregistered provider. A loop-built request satisfies `agent-loop-request?`; listeners read it and never rebuild it for the same call. Exceptions from listeners propagate to the caller of `llm-stream`. |
-| `llm/adapters-updated` | emit | none | The runtime after every route or directory commit and at every registration release | Fired after the registry holds the new state; exactly one per `replace!`. The runtime does not use `dispatch-llm-adapters-updated`: it calls each of `(ctx-listeners ctx 'llm/adapters-updated)` in order inside its own handler, logging `llm: an llm/adapters-updated listener failed` and the exception at `warning`, so a failing listener neither vetoes the commit nor starves later listeners. |
+| `llm/adapters-updated` | emit | none | The runtime after every route or directory commit and at every registration release | Fired after the registry holds the new state; exactly one per `replace!`. The runtime does not use `dispatch-llm/adapters-updated`: it calls each of `(ctx-listeners ctx 'llm/adapters-updated)` in order inside its own handler, logging `llm: an llm/adapters-updated listener failed` and the exception at `warning`, so a failing listener neither vetoes the commit nor starves later listeners. |
 | `llm/models-updated` | emit | `(provider)` | A model listing cache, only after its view changed: a loaded listing differs from the previous one, the route stopped following a listing, or it lost authentication | Listeners reload `(llm-list-models x provider)`. |
 | `llm-pi-ai/request-headers` | waterfall | `(request headers next)`; `request` is `{provider, model, baseURL, sessionId?, purpose?}`; `headers` a header alist; result a header alist | `llm-pi-ai`, once per inference call, not for discovery | Synchronous: listeners must not await. An exception fails the call with `REQUEST_HEADERS`. Afterwards the adapter overwrites the attribution header. |
 
@@ -646,7 +688,7 @@ Each row is a module `dsh-llm/plugin/<short-name>` providing `plugin`. `#:name` 
 | `@deepseek-ai/dsh-llm-deepseek-api-key` | `llm-deepseek-api-key` | `llm` | none | shared DeepSeek fields + listing fields + `apiKeyEnv` (below) | D15. |
 | `@deepseek-ai/dsh-llm-deepseek-account` | `llm-deepseek-account` | `llm` | none | shared DeepSeek fields without `models` + listing fields + `modelOverrides` | D16. |
 | `@deepseek-ai/dsh-llm-pi-ai` | `llm-pi-ai` | `llm` | none | `providers` (below) | P1 to P12. |
-| `@deepseek-ai/dsh-llm-retry` | `llm-retry` | `agents`, `sessionProjections` | none | empty object; a key `retryPolicy` raises `llm-retry: retryPolicy belongs under each provider configuration`, any other key `llm-retry: unknown key "<k>"` | Registers the `llmRetry` projection, awaits it, registers the `agent/request-error` listener and the drain effect (E). `(make-llm-retry-plugin #:random r #:delay-evt f)` builds a variant for tests. |
+| `@deepseek-ai/dsh-llm-retry` | `llm-retry` | `agents`, `sessionProjections` | none | empty object; a key `retryPolicy` raises `llm-retry: retryPolicy belongs under each provider configuration`, any other key `llm-retry: unknown key "<k>"` | Registers the `llmRetry` projection, awaits it, registers the `agent/request-error` listener and the drain effect (E). `(make-llm-retry-plugin #:random [r random] #:delay-evt [f default-delay-evt]) -> plugin?`, exported by `dsh-llm/plugin/llm-retry` beside `plugin`, builds a variant for tests; `plugin` is `(make-llm-retry-plugin)`. |
 | `@deepseek-ai/dsh-token-meter` | `token-meter` | `sessionProjections` | `tokenMeter` | empty object; any key raises `TokenMeterConfig: unknown key "<k>" (no settings are supported)` | Registers the four projections in the order `tokenMeasurement`, `tokenUsage`, `contextPressure`, `contextBreakdown`, awaiting each; listens to `session/event`; provides the service. |
 | `@deepseek-ai/dsh-deepseek-llm-api-extensions` | `deepseek-llm-api-extensions` | none | `deepseekLlmApiExtensions` | none | Creates the registry and provides it. |
 | `@deepseek-ai/dsh-plugin-package-inventory-deepseek` | `plugin-package-inventory-deepseek` | `agents`, `deepseekLlmApiExtensions`, `loader` | none | `enabled`: boolean, default `true` | `enabled: false` registers nothing; otherwise registers the field `dsh_plugin_packages` (G). |
@@ -1018,6 +1060,7 @@ V3. The command line accepts the flags, checks and JSONL output of R6 Formats 13
 
 Racket-only extensions introduced here, for the coordinator to record in an ADR:
 
+- Module `dsh-llm/cancel`: cancel sources, cancel evts and `exn:fail:abort`, the Racket form of `AbortController` and `AbortSignal` for every package (ADR 0002).
 - Plugin `racket:llm-mock` and its service key `racket:llmMock`; failure code `MOCK_SCRIPT_EXHAUSTED`.
 - Optional service key `racket:sessionFixtureDecoder`: a fixture decoder (the `decode` procedure of I2) that the `llm-replay` plugin uses when mounted, so `dsh-session-store` can supply older Session format generations without `dsh-llm` depending on it.
 - The mock server's command line is a Racket module (`dsh-llm/testing/mock-server-cli`).
@@ -1032,11 +1075,11 @@ The package is too large for one implementer. Three units, each with its own tes
 
 | Unit | Modules | Depends on |
 |---|---|---|
-| 1. Vocabulary and runtime | `jrecord`, `messages`, `errors`, `stream`, `content`, `retry-policy`, `attribution`, `ports`, `adapter-kit`, `llm`, `extensions`, `retry`, `testing/mock`; plugins `llm`, `deepseek-llm-api-extensions`, `llm-retry`, `llm-mock`; `plugins` (the full table, all rows) | `cordis`, `cordis-data`, `cordis-schema`, `dsh-util`, `dsh-session` |
+| 1. Vocabulary and runtime | `cancel`, `jrecord`, `messages`, `errors`, `stream`, `content`, `retry-policy`, `attribution`, `ports`, `adapter-kit`, `llm`, `extensions`, `retry`, `testing/mock`; plugins `llm`, `deepseek-llm-api-extensions`, `llm-retry`, `llm-mock`; `plugins` (the full table, all rows) | `cordis`, `cordis-data`, `cordis-schema`, `dsh-util`, `dsh-session` |
 | 2. DeepSeek route | `http`, `sse`, `deepseek/*`, `testing/mock-server`, `testing/mock-server-cli`; plugins `llm-deepseek-api-key`, `llm-deepseek-account`, `plugin-package-inventory-deepseek` | unit 1 |
 | 3. Meter, replay, pi-ai | `token-meter`, `replay`, `pi-ai/*`; plugins `token-meter`, `llm-replay`, `llm-pi-ai` | unit 1; from unit 2 only the items below |
 
-Order: unit 1 first. Units 2 and 3 start as soon as unit 1's public modules exist with the signatures of this document (bodies may still be stubs for a day), and run in parallel. Inside unit 2 the text path comes first (`http`, `sse`, `deepseek/config`, `serialize`, `translate`, `transport`, `adapter`, `host`, the api-key plugin, the mock server); listing, listed catalog, the account plugin, images, image tokens and files follow. The image and Files paths cannot be exercised end to end until `dsh-fs` provides `attachments`, so they may land after the wave 3 gate with unit tests against the mock Files server of `packages/llm/llm-deepseek/tests/mock-server.ts`. Inside unit 3, token meter and replay come first, then `pi-ai/config` and `openai-completions`, then `anthropic-messages`.
+Order: unit 1 first, and inside it `cancel` and `jrecord` before anything else: `dsh-tools` re-exports `cancel` and `dsh-agent` declares its stream frames with `define-jrecord`, and both are built in the same wave. Units 2 and 3 start as soon as unit 1's public modules exist with the signatures of this document (bodies may still be stubs for a day), and run in parallel. Inside unit 2 the text path comes first (`http`, `sse`, `deepseek/config`, `serialize`, `translate`, `transport`, `adapter`, `host`, the api-key plugin, the mock server); listing, listed catalog, the account plugin, images, image tokens and files follow. The image and Files paths cannot be exercised end to end until `dsh-fs` provides `attachments`, so they may land after the wave 3 gate with unit tests against the mock Files server of `packages/llm/llm-deepseek/tests/mock-server.ts`. Inside unit 3, token meter and replay come first, then `pi-ai/config` and `openai-completions`, then `anthropic-messages`.
 
 The internal interface unit 3 takes from unit 2, beyond the public signatures already listed (`http-request`, `http-response-read!`, `make-sse-reader`, `sse-read!`, `make-messages-translator`, `translator-push!`, `translator-finish!`, `provider-error`, `messages-api-root`):
 
@@ -1082,6 +1125,8 @@ Tests are `rackunit` files under `racket/dsh-llm/tests/`, run with `raco test ra
 
 Expected outcome of each mock-server behaviour through the DeepSeek adapter and `llm-stream` (verify against `transport-recovery.spec.ts` and `adapter.spec.ts`; the TypeScript expectation wins on any difference): `success`, `slow_success`, `wrong_content_type`, `reasoning_success` finish `stop`; `tool_call_success` finishes `tool-calls`; `max_tokens` finishes `max-tokens`; `connection_reset`, `stream_disconnect`, `partial_disconnect` give `TRANSPORT`; `stream_eof`, `empty_body`, `partial_eof` give `STREAM_CLOSED`; `empty` gives `EMPTY_RESPONSE`; `stall` gives `TIMEOUT`; `malformed_json`, `malformed_event` give `MALFORMED_RESPONSE`; `rate_limit` gives `RATE_LIMIT` with `providerRetryAfterMs`; `server_error`, `service_unavailable` give `SERVER`; `auth_error` gives `AUTH`; `invalid_request` gives `INVALID_REQUEST`; `context_overflow` gives `CONTEXT_WINDOW_EXCEEDED`; `quota_exceeded` gives `QUOTA`; script exhaustion gives `SERVER`.
 
+Services of later packages. `llm-retry` injects `agents` and `sessionProjections`, `token-meter` injects `sessionProjections`, and the inventory plugin injects `agents`, `deepseekLlmApiExtensions` and `loader`; `agents`, `sessionProjections` and `loader` are provided by packages built after this one. The tests of this package provide stand-ins with `ctx-provide`: any value for `agents` (neither plugin of this package reads it: `llm-retry` injects it so that it mounts after the owner of `agent/request-error`, and what dsh's inventory plugin reads from it, the agent of a session id, is inside the provider's `inventory-port` implementation here), the in-memory projection port of Open question 1 for `sessionProjections`, and a struct that implements `inventory-port` for `loader`. `retry-test.rkt` dispatches `agent/request-error` itself with `ctx-waterfall`, a payload `hasheq` with the keys of Behaviour E and an innermost step that returns `#f`.
+
 Rules for all tests: no wall-clock assertions (waits are sequenced with evts and injected delay procedures; the one real timer, the idle timeout, uses a small configured value under a generous outer timeout); every listener, temporary directory and thread is released; a registration test disposes the fiber and observes the removal.
 
 Acceptance gate for the package: `raco test racket/dsh-llm` passes; and the wave 3 gate holds for this package's part: a `racket:llm-mock` script with one tool call, driven through `llm-prepare-call` and `prepared-call-stream`, accumulated with `accumulator-push` and assembled, produces an `assistant/message` payload (`message`, `usage`, `stream`) whose JSON text equals the corresponding recorded row once ids and times are substituted. An optional live smoke test (skipped without `DEEPSEEK_API_KEY`) sends one text request through the api-key plugin.
@@ -1090,15 +1135,15 @@ Acceptance gate for the package: `raco test racket/dsh-llm` passes; and the wave
 
 Each has a default so no implementer is blocked.
 
-1. **Projection registry.** `llm-retry` and `token-meter` inject `sessionProjections`, which dsh implements in `packages/session/session-projection` (a wave 4 group) but which `core/agent` and `core/agent-loop` also inject, so some wave 3 package must provide it; `dsh-session.md` and `dsh-tools.md` do not. Default: this package consumes the registry only through `projection-port` and `projection-definition` of `dsh-llm/ports`, and the provider (expected: `dsh-agent`, which already depends on `dsh-llm`) implements the port on its service value. If the provider's contract defines its own definition struct instead, it supplies a converter from `projection-definition`; the fold procedures and state layouts here do not change. Until a provider exists, tests use a 40-line in-memory port (fold on read) kept under `tests/`.
+1. **Projection registry.** Settled by [dsh-agent.md](dsh-agent.md): its plugin `racket:session-projections` provides `sessionProjections` in wave 3 with a value that implements `gen:projection-port`, and it uses `projection-definition` of `dsh-llm/ports` unchanged. `dsh-agent` is built after this package, so the tests of this package cannot mount that plugin; they use a 40-line in-memory port (fold on read) kept under `tests/`, with the behaviour of dsh-agent rules 68 and 69.
 
-2. **`agent/request-error` payload.** Default: `dsh-agent` dispatches one payload readable with `jref` under the keys of Behaviour E, including `session` and `cancel`. If the session is reachable only through the agent value, the ten lines that register the listener move to a plugin module in `dsh-agent` that requires `dsh-llm/retry`, and the `plugin-table` row moves with it; `make-retry-recovery` is unaffected.
+2. **`agent/request-error` payload.** Settled by [dsh-agent.md](dsh-agent.md): every `agent/*` payload is an immutable `hasheq` with symbol keys that `jref` reads, and it carries `'session` and `'cancel` beside the dsh keys. The `llm-retry` plugin therefore stays in this package.
 
 3. **Loader entry id.** The settings namespace needs the `id` of the plugin's loader entry (`ctx.fiber.entry?.options.id`). Default: `(context-meta ctx 'loader/entry-id #f)`, falling back to the short name.
 
 4. **Schema features.** This contract assumes `cordis-schema` offers, beyond the constructors named in the brief, modifiers for numeric bounds (`min`, `max`, `step`), `role`, and volatile references with a reader. Default when volatile references are missing: the plugin reads `(fiber-effective-config (context-fiber ctx))` through `config-get` on each operation, which is behaviourally the same for a settings change that updates the fiber's config without a restart.
 
-5. **`settings.configure({auto: false}, fiber)`.** The provider plugins call it when the `settings` service is present. It is not part of wave 3; when `dsh-platform` defines that service it also defines how a lower-wave plugin opts out (a port in `dsh-llm/ports` is the expected form).
+5. **`settings.configure({auto: false}, fiber)`.** Settled in the wave 3 review: `gen:settings-port` in `dsh-llm/ports` (Services, "Ports"), shared with `dsh-agent`. The provider of the `settings` service (`dsh-platform`, wave 4) implements it; until then the injected child stays pending.
 
 6. **`dsh-util` names.** Assumed: `exn:fail:harness` with accessor `exn:fail:harness-code` and a way to construct substructs; a UUID generator; `(launch-environment-ref ctx name)` returning a string or `#f`; the Harness home path; the proxy policy `(proxy-for-url url)` returning a proxy URL or `#f`; atomic file replacement. Default: use whatever the `dsh-util` contract names; where one is missing, implement it privately here and report it.
 

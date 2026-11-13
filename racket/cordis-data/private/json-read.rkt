@@ -62,6 +62,33 @@
     [(< exponent10 0) (real->double-flonum (/ mantissa (expt 10 (- exponent10))))]
     [else (real->double-flonum (* mantissa (expt 10 exponent10)))]))
 
+;; No decimal needs more significant digits than this to round correctly, as long as it is known
+;; whether the digits beyond are all zero: the midpoint between two doubles has at most 767.
+(define significant-digit-limit 800)
+
+;; The double nearest to 0.<digits> x 10^(length + exponent10), that is, to the integer `digits`
+;; spell times 10^exponent10. Digits past the limit are replaced by one digit that records
+;; whether any of them is nonzero, which keeps the arithmetic bounded for any input length.
+(define (long-decimal->flonum digits exponent10)
+  (define count (string-length digits))
+  (define start
+    (let loop ([i 0])
+      (if (and (fx< i count) (char=? (string-ref digits i) #\0)) (loop (fx+ i 1)) i)))
+  (define significant (fx- count start))
+  (cond
+    [(fx<= significant significant-digit-limit)
+     (decimal->flonum (string->number digits 10) significant exponent10)]
+    [else
+     (define cut (fx+ start significant-digit-limit))
+     (define rest-nonzero?
+       (let loop ([i cut])
+         (and (fx< i count)
+              (or (not (char=? (string-ref digits i) #\0)) (loop (fx+ i 1))))))
+     (decimal->flonum
+      (string->number (string-append (substring digits start cut) (if rest-nonzero? "1" "0")) 10)
+      (fx+ significant-digit-limit 1)
+      (+ exponent10 (fx- count cut) -1))]))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; Parser
 
@@ -295,21 +322,29 @@
       [else
        (define fraction-digits (if (fx> frac-end int-end) (fx- frac-end (fx+ int-end 1)) 0))
        (define digit-count (fx+ (fx- int-end int-start) fraction-digits))
-       (define mantissa
-         (cond
-           [(fx= fraction-digits 0) (digits->integer int-start int-end)]
-           [(fx<= digit-count 18)
-            (accumulate-digits (fx+ int-end 1) frac-end (accumulate-digits int-start int-end 0))]
-           [else
-            (string->number (string-append (substring text int-start int-end)
-                                           (substring text (fx+ int-end 1) frac-end))
-                            10)]))
        (define exponent
          (if exponent-start
              (let ([magnitude (exponent-magnitude exponent-start number-end)])
                (if (char=? (string-ref text (fx- exponent-start 1)) #\-) (- magnitude) magnitude))
              0))
-       (define magnitude (decimal->flonum mantissa digit-count (- exponent fraction-digits)))
+       (define exponent10 (- exponent fraction-digits))
+       (define magnitude
+         (cond
+           [(fx> digit-count 18)
+            (long-decimal->flonum
+             (if (fx= fraction-digits 0)
+                 (substring text int-start int-end)
+                 (string-append (substring text int-start int-end)
+                                (substring text (fx+ int-end 1) frac-end)))
+             exponent10)]
+           [(fx= fraction-digits 0)
+            (decimal->flonum (accumulate-digits int-start int-end 0) digit-count exponent10)]
+           [else
+            (decimal->flonum (accumulate-digits (fx+ int-end 1)
+                                                frac-end
+                                                (accumulate-digits int-start int-end 0))
+                             digit-count
+                             exponent10)]))
        (if negative? (fl* -1.0 magnitude) magnitude)]))
 
   ;; `value` extended by the decimal digits in [from, to), in fixnum arithmetic: the caller

@@ -204,7 +204,8 @@
 
 (test-case "jmerge-deep merges objects recursively and lets the second value win otherwise"
   (define a (jobject 'keep 1 'obj (jobject 'x 1 'y (jobject 'p 1)) 'list (list 1 2) 's "old"))
-  (define b (jobject 'obj (jobject 'y (jobject 'q 2) 'z 3) 'list (list 3) 's (jobject 'n 1) 'new #t))
+  (define b
+    (jobject 'obj (jobject 'y (jobject 'q 2) 'z 3) 'list (list 3) 's (jobject 'n 1) 'new #t))
   (define merged (jmerge-deep a b))
   (check-equal? (jkeys merged) '(keep obj list s new))
   (check-equal? (jref merged 'obj) (jobject 'x 1 'y (jobject 'p 1 'q 2) 'z 3))
@@ -235,7 +236,8 @@
                 '((b . (b 10)) (a . (a 20)) (c . (c 30))))
   (check-equal? (jobject->alist (jfilter (lambda (key value) (odd? value)) sample))
                 '((b . 1) (c . 3)))
-  (check-equal? (jobject->alist (jfilter (lambda (key value) (not (eq? key 'b))) (jset sample 'd 4)))
+  (check-equal? (jobject->alist (jfilter (lambda (key value) (not (eq? key 'b)))
+                                         (jset sample 'd 4)))
                 '((a . 2) (c . 3) (d . 4)))
   (check-exn exn:fail:contract? (lambda () (jmap (lambda (key value) (void)) sample)))
   (check-exn exn:fail:contract? (lambda () (jmap add1 sample))))
@@ -310,7 +312,8 @@
                   [(jobj-pat [type "text"] [text body]) body])
                 "hi")
   (check-equal? (match (jobject '$ref "#/defs/x" 'nested (jobject 'deep (list 1 2)))
-                  [(jobj-pat ["$ref" ref] [nested (jobj-pat [deep (list _ second)])]) (list ref second)])
+                  [(jobj-pat ["$ref" ref] [nested (jobj-pat [deep (list _ second)])])
+                   (list ref second)])
                 '("#/defs/x" 2))
   ;; A key that holds #f or 'null is present.
   (check-equal? (match (jobject 'flag #f 'none 'null)
