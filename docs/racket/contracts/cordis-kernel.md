@@ -87,6 +87,7 @@ Rules:
 ```
 
 - Contexts are immutable values. Derivation shares structure. Two contexts are the same scope when `eq?`.
+- Loader support (module `cordis/private/loader-support`, not re-exported from `cordis`): `(context-derive/rebindable ctx) -> context?` returns a child whose parent link, realm table and intercept table live in a mutable cell, with `(context-rebind! c #:parent [p] #:realms [r] #:intercepts [i]) -> void?` and `(context-own-realms c)`, `(context-own-intercepts c)`. Lookups on such a context and on every context derived from it read through the cell, so the loader can re-parent an entry or change its isolation without recreating its fiber, which is what `Object.setPrototypeOf(entry.ctx, parent.ctx)` does in the TypeScript loader. After a rebind the loader is responsible for calling `(ctx-notify! ctx keys)` (also exported there) for the affected names.
 - The root context owns: the service store, the property table, the listener table, the runtime registry, counters, the scheduler, a kernel custodian (child of `#:custodian`) and the root fiber. The root fiber is `'active`, has uid `0`, no plugin, and an empty inject list.
 - Every public kernel operation that mutates state may be called from any thread. When called outside a task it runs through `call-in-kernel` on the root's scheduler. Read-only accessors do not need the baton.
 - Keys (service names, event names, meta keys) are symbols. Functions that take a key also accept a string and convert with `string->symbol`.
