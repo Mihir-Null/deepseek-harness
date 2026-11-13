@@ -11,7 +11,7 @@ Package `racket/cordis-yaml/`, collection `cordis-yaml`, `(define deps '("base" 
 | `cordis-yaml` (`main.rkt`) | section 2: the reader, the writer, `exn:fail:yaml`, and the `js-expr` bindings of section 3 |
 | `cordis-yaml/js-expr` | sections 3 to 6: expression nodes, the parser and its AST, the evaluator, environments, host objects, the Node `process` object |
 
-Internal modules live under `private/`.
+Internal modules live under `private/`. The two public modules export the same `js-expr` bindings, so a client may require both.
 
 ## 2. YAML (`cordis-yaml`)
 
@@ -26,7 +26,7 @@ Internal modules live under `private/`.
 (struct exn:fail:yaml exn:fail (reason source line column position))
 ```
 
-`in` is a string, a byte string or an input port. Bytes and ports are read to the end and decoded as UTF-8 the way Node's `readFile(path, 'utf8')` does (an invalid sequence becomes U+FFFD). `source` names the input in error messages and in the `srcloc` of expression nodes; it defaults to the port's `object-name` for a port and to `#f` otherwise.
+`in` is a string, a byte string or an input port. Bytes and ports are read to the end and decoded as UTF-8 the way Node's `readFile(path, 'utf8')` does (an invalid sequence becomes U+FFFD). `source` names the input in error messages and in the `srcloc` of expression nodes; it defaults to the port's `object-name` for a port when that is a path or a string, and to `#f` otherwise.
 
 ### 2.1 Values
 
@@ -41,7 +41,7 @@ Internal modules live under `private/`.
 | null scalar, empty node | `'null` |
 | `!!js` scalar | `js-expr` (section 3); the reader never evaluates it |
 
-`yaml-read` returns the single document. An input with no document (empty, or spaces only) returns `(void)`, as js-yaml's `load` returns `undefined`; an input that holds only comments or line breaks is one empty document and returns `'null`. More than one document raises `exn:fail:yaml` with reason `expected a single document in the stream, but found more`. `yaml-read-all` returns the list of documents.
+`yaml-read` returns the single document. An input with no document returns `(void)`, as js-yaml's `load` returns `undefined`: that is the empty text, and a text of spaces followed by at most one line break. Any other text without content (comments, two line breaks, a tab) is one empty document and returns `'null`. More than one document raises `exn:fail:yaml` with reason `expected a single document in the stream, but found more`. `yaml-read-all` returns the list of documents.
 
 `+inf.0`, `-inf.0` and `+nan.0` are not jvalues (ADR 0006); they appear only when a file writes `.inf` or `.nan`.
 
@@ -65,11 +65,11 @@ Plain scalars resolve by js-yaml's JSON schema rules, in this order; anything el
 | integer | optional sign, then decimal digits (leading zeros allowed: `012` is 12), `0x` hex digits, `0o` octal digits or `0b` binary digits; `-0` is 0 |
 | float | `[-+]?digits[.digits][e[-+]digits]`, `.digits[e[-+]digits]`, `[-+]?.inf`, `.nan` (also `.Inf`, `.INF`, `.NaN`, `.NAN`) |
 
-`yes`, `no`, `on`, `off`, timestamps, `1_000`, `0o` without digits and `-.5` are strings. An integer or float too large for a double is a string, as in js-yaml. Quoted and block scalars are strings unless tagged. Merge keys are not part of the dsh schema: `<<` is an ordinary key.
+`yes`, `no`, `on`, `off`, timestamps, `1_000`, `0o` without digits and `-.5` are strings. An integer or a float whose value is beyond the largest double is a string, as in js-yaml. Quoted and block scalars are strings unless tagged. Merge keys are not part of the dsh schema: `<<` is an ordinary key.
 
-A mapping key is converted to a string the way JavaScript's `String(key)` does (`1: a` has the key `"1"`, `null: a` the key `"null"`, `[a, b]: c` the key `"a,b"`, a mapping key `"[object Object]"`). A duplicated key raises `duplicated mapping key`.
+A mapping key is converted to a string the way JavaScript's `String(key)` does (`1: a` has the key `"1"`, `null: a` and `~: a` the key `"null"`, `[a, b]: c` the key `"a,b"`, a mapping key `"[object Object]"`). A duplicated key raises `duplicated mapping key`.
 
-`!!js` is a scalar tag: `!!js` on a collection, and `!!js` with no scalar after it, raise `exn:fail:yaml`. The source of the expression node is the scalar's content after YAML unquoting or block-scalar folding. With `#:schema 'json` the tag `!!js` is unknown and raises, as with js-yaml's `JSON_SCHEMA`; everything else is the same.
+`!!js` is a scalar tag: `!!js` on a collection raises `unknown tag !<tag:yaml.org,2002:js>` (js-yaml looks a tag up among the types of the node's kind), and `!!js` with no scalar after it raises `cannot resolve a node with !<tag:yaml.org,2002:js> explicit tag`. The source of the expression node is the scalar's content after YAML unquoting or block-scalar folding. With `#:schema 'json` the tag `!!js` is unknown and raises, as with js-yaml's `JSON_SCHEMA`; everything else is the same.
 
 ### 2.3 Errors
 
@@ -79,23 +79,26 @@ A syntax error raises `exn:fail:yaml`. `reason` is js-yaml's reason text (`bad i
 
 `yaml-write` and `yaml->string` produce the text of `yaml.dump(value, { schema: entryListSchema, noRefs: true, lineWidth })`: block style, two spaces per level, a sequence under a mapping key indented by two, `- ` items compacted (`- id: a`), empty collections as `[]` and `{}`, and a final newline.
 
-- Accepted values: jvalues, `js-expr`, the flonums `+inf.0`, `-inf.0`, `+nan.0`, and a hash wherever an object may appear (read as `cordis-data` reads it). Anything else, `(void)` included, raises `exn:fail:contract` that names the path of the offending value.
-- Strings are plain when js-yaml would write them plain; single-quoted when they would read back as another type (`'true'`, `'12'`, `'null'`), are empty, start with an indicator, contain `: ` or ` #`, or are one of the YAML 1.1 booleans (`'yes'`, `'on'`, ...); double-quoted with escapes when they hold a character that cannot be written literally; literal block scalars (`|`, `|-`, `|+`, with an indentation digit when the text starts with a space) when they contain a line break; folded block scalars (`>`) when a line is longer than the line width and can be folded. Keys are never block scalars.
+- Accepted values: jvalues, `js-expr`, the flonums `+inf.0`, `-inf.0`, `+nan.0`, and a hash wherever an object may appear (read as `cordis-data` reads it). Anything else, `(void)` included, raises `exn:fail:contract` that names the path of the offending value, and nothing is written.
+- Strings are plain when js-yaml would write them plain; single-quoted when they would read back as another type (`'true'`, `'12'`, `'null'`), are empty, start with an indicator, contain `: ` or ` #`, or are one of the YAML 1.1 booleans or base-60 numbers (`'yes'`, `'on'`, `'1:30'`, ...); double-quoted with escapes when they hold a character that cannot be written literally; literal block scalars (`|`, `|-`, `|+`, with an indentation digit when the text starts with a space) when they contain a line break; folded block scalars (`>`) when a line is longer than the line width. Keys are never block scalars.
 - `line-width` is a positive integer, or `#f` for no limit (js-yaml's `lineWidth: -1`). As in js-yaml the width available to a scalar is `max(min(line-width, 40), line-width - indentation)`.
-- Numbers: an integer-valued number is written in JavaScript's `String(n)` form; other flonums as `String(n)`, with `.inf`, `-.inf`, `.nan`, `-0.0` for the special values.
-- A `js-expr` is written as `!!js` followed by its source as a scalar, styled as a string would be. A jobject with a string `__jsExpr` member is an expression node in dsh's representation and is written the same way.
+- Numbers: an integer-valued number is written in JavaScript's `String(n)` form; other flonums as `String(n)` with a dot before an exponent (`1.e-7`), and `.inf`, `-.inf`, `.nan`, `-0.0` for the special values.
+- A `js-expr` is written as `!!js` followed by its source as a scalar, styled as a string would be. A jobject with a string `__jsExpr` member is an expression node in dsh's representation and is written the same way, its other members dropped as js-yaml drops them. A jobject whose `__jsExpr` member is not a string is written as an ordinary mapping; js-yaml cannot write it.
 - Objects are written in their key order. A key longer than 1024 UTF-16 units is written in the explicit `? key` form.
 - Anchors and aliases are never written: values are immutable and sharing carries no meaning.
 
-Guarantees: `(yaml-read (yaml->string v))` is `equal?` to `v` for every value the reader can produce, except that a number may come back in the other exactness (`1.0` is written `1` and read as `1`; an exact integer beyond 2^53 is written as the nearest double). js-yaml with `entryListSchema` loads every text the writer produces to the same data.
+Three kinds of root scalar are written differently from js-yaml, because js-yaml does not read back the text it writes for them. A plain scalar at the first column (the document itself, or a key of the root mapping) that begins like the document end marker (`...`, `... a`) is single-quoted. A document that is a string, or a `js-expr` source, of line breaks only, or a multi-line one that starts with a space, is double-quoted instead of a block scalar. Below the root these values are written as js-yaml writes them.
+
+Guarantees: `(yaml-read (yaml->string v))` is `equal?` to `v` for every value the reader can produce, except that a number may come back in the other exactness (`1.0` is written `1` and read as `1`; an exact integer beyond 2^53 is written as the nearest double) and that a jobject with a string `__jsExpr` member comes back as a `js-expr`. js-yaml with `entryListSchema` loads every text the writer produces to the same data.
 
 ### 2.5 Differences from js-yaml
 
 - Key order: a jobject keeps document order. JavaScript moves keys that are array indexes (`"0"`, `"42"`) to the front.
-- Recursive aliases (`&a [*a]`) raise `exn:fail:yaml`; js-yaml builds a cyclic object.
-- A lone surrogate escape (`"\ud800"`) becomes U+FFFD; an escaped pair becomes the one character. An escape above U+10FFFF raises.
-- Integers of any size stay exact. Columns and widths count characters; js-yaml counts UTF-16 units, so they differ only on lines that hold characters above U+FFFF (the writer's width arithmetic does count UTF-16 units).
-- The loader option `maxDepth` keeps its default of 100 nested nodes; deeper input raises as in js-yaml.
+- Recursive aliases (`&a [*a]`) raise `exn:fail:yaml` with reason `recursive aliases are not supported`; js-yaml builds a cyclic object.
+- A `\u` escape of a lone surrogate (D800 to DFFF) becomes U+FFFD; an escaped pair becomes the one character. An escape above U+10FFFF raises.
+- An integer scalar stays exact whatever its size, up to the largest double; js-yaml rounds it to a double. Columns, positions and snippet widths count characters; js-yaml counts UTF-16 units, so they differ only on lines that hold characters above U+FFFF (the writer's width arithmetic does count UTF-16 units).
+- The loader option `maxDepth` keeps its default of 100: a node nested inside 98 collections is read, one more level raises `nesting exceeded maxDepth (100)`, as in js-yaml.
+- The three root scalars of section 2.4.
 
 ## 3. Expression nodes (`cordis-yaml/js-expr`, also exported by `cordis-yaml`)
 
@@ -106,7 +109,7 @@ Guarantees: `(yaml-read (yaml->string v))` is `equal?` to `v` for every value th
 (js-expr-srcloc e) -> (or/c srcloc? #f)         ; source name, 1-based line, 0-based column, 1-based position, span #f
 ```
 
-A `js-expr` is an opaque immutable value. Two are `equal?` when their sources are `string=?`; the location does not take part. It prints as `#<js-expr SOURCE>`. The location is where the scalar's tag starts in the YAML text.
+A `js-expr` is an opaque immutable value. Two are `equal?` when their sources are `string=?`; the location does not take part. It prints as `#<js-expr SOURCE>`. The location is where the scalar's tag starts in the YAML text. A node keeps the parse of its source after the first evaluation.
 
 ## 4. Parsing (`cordis-yaml/js-expr`)
 
@@ -114,7 +117,7 @@ A `js-expr` is an opaque immutable value. Two are `equal?` when their sources ar
 (js-parse str) -> list?        ; the AST below; raises exn:fail:js-expr:syntax or exn:fail:js-expr:unsupported
 ```
 
-The parser is a hand-written tokenizer and a precedence-climbing parser. The AST is plain quoted data: lists whose first element is a symbol, with strings, numbers and booleans as leaves. It can be printed, compared with `equal?`, and taken apart with `racket/match`.
+The parser is a hand-written tokenizer and a precedence-climbing parser. The AST is plain quoted data: lists whose first element is a symbol, with strings, numbers and booleans as leaves. It can be printed and read back, compared with `equal?`, and taken apart with `racket/match`.
 
 ```
 expr  = (num N)                         ; N: exact integer when the literal is integral and at most 2^53, else flonum
@@ -141,9 +144,9 @@ expr  = (num N)                         ; N: exact integer when the literal is i
 
 `NAME` and `S` are strings, `OP` is a symbol. Examples: `process.platform` parses to `(member (id "process") "platform")`; `ctx.get('profileContext')?.name !== 'desktop'` to `(binary !== (chain (opt-member (call (member (id "ctx") "get") (str "profileContext")) "name")) (str "desktop"))`. `(chain e)` marks how far a short circuit reaches: when the value before a `?.` inside `e` is `null` or `undefined`, the whole of `e` is `undefined`. An empty source parses to `(undefined)`, the value JavaScript's `eval('')` gives.
 
-Syntax covered: decimal, hex, octal and binary number literals with `_` separators; single- and double-quoted strings and template literals with the escapes `\n \t \r \b \f \v \0 \' \" \\ \xHH \uHHHH \u{H...}` and line continuations; `true`, `false`, `null`, `undefined`; identifiers; array literals and object literals (identifier, string and number keys, shorthand, computed keys, spread, trailing commas); member access, computed access, optional chaining; calls with spread; `new`; the operators listed in the AST; the conditional operator; parentheses; arrow functions with identifier parameters and an expression body; `//` and `/* */` comments.
+Syntax covered: decimal, hex, octal and binary number literals with `_` separators; single- and double-quoted strings and template literals with the escapes `\n \t \r \b \f \v \0 \' \" \\ \xHH \uHHHH \u{H...}` and line continuations; `true`, `false`, `null`, `undefined`; identifiers (`await`, `yield`, `let`, `async` and `of` are identifiers here, as in the non-strict code dsh evaluates); array literals and object literals (identifier, string and number keys, shorthand, computed keys, spread, trailing commas); member access, computed access, optional chaining; calls with spread; `new`; the operators listed in the AST; the conditional operator; parentheses; arrow functions with identifier parameters and an expression body; `//` and `/* */` comments.
 
-Everything else that is JavaScript raises `exn:fail:js-expr:unsupported` with the name of the construct and its position: assignment and update operators, the comma operator, statements and semicolons, a source that starts with `{` (JavaScript parses it as a block, not an object literal), `function` and `class` expressions, block-bodied or `async` arrows, destructuring, default and rest parameters, regular expression literals, tagged templates, `this`, `super`, `new.target`, `import`, `await`, `yield`, `delete`, `in`, `instanceof`, `**`, bitwise and shift operators, BigInt literals, legacy octal literals and escapes, array holes, getters, setters and methods in object literals, `__proto__` in an object literal. Text that is not JavaScript at all (an unterminated string, a missing operand, `a ?? b || c` without parentheses) raises `exn:fail:js-expr:syntax`.
+Everything else that is JavaScript raises `exn:fail:js-expr:unsupported` with the name of the construct and its position: assignment and update operators, the comma operator, statements and semicolons, a source that starts with `{` (JavaScript parses it as a block, not an object literal), `function` and `class` expressions, block-bodied or `async` arrows, destructuring, default and rest parameters, a parameter named `undefined`, regular expression literals, tagged templates, `this`, `super`, `new.target`, `import`, `delete`, `in`, `instanceof`, `**`, bitwise and shift operators, BigInt literals, legacy octal literals and escapes, array holes, getters, setters and methods in object literals, `__proto__` in an object literal, a Unicode escape in an identifier, and a string literal that holds a lone surrogate. Text that is not JavaScript at all (an unterminated string, a missing operand, `a ?? b || c` without parentheses) raises `exn:fail:js-expr:syntax`. A text with an unsupported construct is reported as unsupported even when a later part of it is not JavaScript.
 
 ## 5. Evaluation (`cordis-yaml/js-expr`)
 
@@ -161,7 +164,7 @@ js-standard-globals : hash?                    ; name (string) -> value
 (struct exn:fail:js-expr:unsupported exn:fail:js-expr (construct))
 ```
 
-`bindings` is a hash from global names (strings or symbols) to values. An identifier resolves, in order, against: the parameters of enclosing arrow functions; `lookup`, a procedure `(lookup name failure-thunk)` in the style of `hash-ref` that stands for dsh's `with (ctx)` scope; `bindings`; `globals`. A name found nowhere raises `exn:fail:js-expr` (`ReferenceError: NAME is not defined`), unless it is a standard JavaScript or Node global that this package does not implement (`Date`, `RegExp`, `Buffer`, `require`, `globalThis`, `process` when the caller bound none, ...), which raises `exn:fail:js-expr:unsupported`. The loader binds `ctx`, `process` and `expr` (dsh's evaluation function has the parameters `ctx` and `expr`) and passes the context's `has` test as `lookup`.
+`bindings` is a hash from global names (strings or symbols) to values. An identifier resolves, in order, against: the parameters of enclosing arrow functions; `lookup`, a procedure `(lookup name failure-thunk)` in the style of `hash-ref` that stands for dsh's `with (ctx)` scope; `bindings`; `globals`. A name found nowhere raises `exn:fail:js-expr` (`ReferenceError: NAME is not defined`), unless it is a standard JavaScript or Node global that this package does not implement (`Date`, `RegExp`, `Buffer`, `require`, `globalThis`, `process` when the caller bound none, ...), which raises `exn:fail:js-expr:unsupported`. `typeof NAME` of any other name found nowhere is `"undefined"`. The loader binds `ctx`, `process` and `expr` (dsh's evaluation function has the parameters `ctx` and `expr`) and passes the context's `has` test as `lookup`.
 
 ### 5.1 Values
 
@@ -174,35 +177,37 @@ js-standard-globals : hash?                    ; name (string) -> value
 | string | string |
 | array | list |
 | plain object | `jobject` (a hash is accepted on input) |
-| function | procedure; a call passes the arguments positionally. A procedure that does not accept the number of arguments given is called with the extra ones dropped or the missing ones as `(void)`, as JavaScript does. |
+| function | procedure; a call passes the arguments positionally. A procedure that does not accept the number of arguments given is called with the extra ones dropped or the missing ones as `(void)`, as JavaScript does. An arrow function is a Racket procedure the host may call. |
 | host object | a value that implements `gen:js-object` (section 6) |
 
-An object literal or spread drops members whose value is `undefined`, because a jobject cannot hold `(void)` (ADR 0006: absent and `undefined` are the same). An array keeps `(void)` elements. Object identity (`===` on arrays and objects) is `eq?`; all empty arrays are one object.
+An object literal or spread drops members whose value is `undefined`, because a jobject cannot hold `(void)` (ADR 0006: absent and `undefined` are the same). An array keeps `(void)` elements. An object that an expression builds (a literal, a spread, `JSON.parse`) has its keys in JavaScript's order, array indexes first; `Object.keys`, `Object.entries`, `JSON.stringify` and spread enumerate any object in that order.
 
-`js-eval` returns the value of the expression. `js-interpolate` walks lists and jobjects as dsh's `interpolate` does and returns the structure with each `js-expr` replaced by its value; an object member whose value is `undefined` is dropped, an array element stays `(void)`.
+Object identity (`===` on arrays, objects and functions) is `eq?`. Racket has one empty list and may share one empty object where JavaScript creates a new object per literal, so comparing two empty arrays or two empty objects for identity raises `exn:fail:js-expr:unsupported`.
+
+`js-eval` returns the value of the expression. `js-interpolate` walks lists and objects as dsh's `interpolate` does and returns the structure with each `js-expr`, and each object with a string `__jsExpr` member, replaced by its value; an object member whose value is `undefined` is dropped, an array element stays `(void)`.
 
 ### 5.2 Semantics
 
-Evaluation follows ECMAScript for the constructs of section 4: truthiness; `===` and `!==`; `==` and `!=` with their coercions; `+` with string concatenation after `ToPrimitive`; `- * / %` on doubles; relational operators on numbers or, when both operands are strings, on UTF-16 code units; short-circuit `&&`, `||`, `??`; `typeof` (including on an undeclared name); optional chaining; spread of arrays and strings into arrays and calls and of objects into objects; template literals; arrow functions as closures. String lengths and indexes are UTF-16 code units.
+Evaluation follows ECMAScript for the constructs of section 4: truthiness; `===` and `!==`; `==` and `!=` with their coercions; `+` with string concatenation after `ToPrimitive` (an own `valueOf` or `toString` function member of a plain object is called; a host object converts through its `toString` property when that is a function, else to `[object Object]`); `- * / %` on doubles; relational operators on numbers or, when both operands are strings, on UTF-16 code units; short-circuit `&&`, `||`, `??`; `typeof`; optional chaining; spread of arrays and strings into arrays and calls and of objects into objects; template literals; arrow functions as closures. More than 2000 nested arrow-function calls raise `RangeError`. String lengths and indexes are UTF-16 code units; an operation whose result would hold half of a surrogate pair raises unsupported, because a Racket string cannot hold it.
 
 Properties and methods implemented:
 
 - strings: `length`, index access, `at`, `charAt`, `concat`, `endsWith`, `includes`, `indexOf`, `padEnd`, `padStart`, `repeat`, `replace` and `replaceAll` (string pattern; string replacement with `$$`, `$&`, `` $` ``, `$'`, or a function), `slice`, `split` (string separator, optional limit), `startsWith`, `substring`, `toLowerCase`, `toString`, `toUpperCase`, `trim`, `trimEnd`, `trimStart`, `valueOf`;
 - arrays: `length`, index access, `at`, `concat`, `every`, `filter`, `find`, `includes`, `indexOf`, `join`, `map`, `slice`, `some`, `toString`; callbacks receive element, index and array;
-- numbers: `toFixed`, `toString` (radix 10; other radixes for integers), `valueOf`; booleans: `toString`, `valueOf`;
+- numbers: `toFixed`, `toString` (radix 10; radixes 2 to 36 for integers), `valueOf`; booleans: `toString`, `valueOf`;
 - objects: own members.
 
-A member of `String.prototype`, `Array.prototype`, `Number.prototype` or `Object.prototype` that is not listed raises `exn:fail:js-expr:unsupported`; a name JavaScript does not define reads as `undefined`, and calling it raises `TypeError`.
+A member of `String.prototype`, `Array.prototype`, `Number.prototype`, `Object.prototype` or `Function.prototype` that is not listed raises `exn:fail:js-expr:unsupported`; a name JavaScript does not define reads as `undefined`, and calling it raises `TypeError`. A listed method read without being called (`'a'.trim`) is a function value, the same value for every string; calling it apart from its object raises unsupported.
 
-`js-standard-globals` holds: `NaN`, `Infinity`, `Number` (callable; `isFinite`, `isInteger`, `isNaN`, `isSafeInteger`, `parseFloat`, `parseInt`, `MAX_SAFE_INTEGER`, `MIN_SAFE_INTEGER`, `MAX_VALUE`, `MIN_VALUE`, `EPSILON`, `POSITIVE_INFINITY`, `NEGATIVE_INFINITY`, `NaN`), `String`, `Boolean`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `JSON` (`parse` without a reviver, `stringify` with an optional numeric indent), `Math` (`abs`, `ceil`, `floor`, `max`, `min`, `round`, `sign`, `trunc`, `PI`), `Array` (`isArray`), `Object` (`keys`, `values`, `entries` of plain objects and arrays), `encodeURIComponent`, `decodeURIComponent`, `encodeURI`, `decodeURI`, and `URL`.
+`js-standard-globals` holds: `NaN`, `Infinity`, `Number` (callable; `isFinite`, `isInteger`, `isNaN`, `isSafeInteger`, `parseFloat`, `parseInt`, `MAX_SAFE_INTEGER`, `MIN_SAFE_INTEGER`, `MAX_VALUE`, `MIN_VALUE`, `EPSILON`, `POSITIVE_INFINITY`, `NEGATIVE_INFINITY`, `NaN`), `String`, `Boolean`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `JSON` (`parse` without a reviver; `stringify` without a replacer, with an optional numeric indent, honouring `toJSON`), `Math` (`abs`, `ceil`, `floor`, `max`, `min`, `round`, `sign`, `trunc`, `PI`), `Array` (`isArray`), `Object` (`keys`, `values`, `entries` of plain objects, arrays and strings), `encodeURIComponent`, `decodeURIComponent`, `encodeURI`, `decodeURI`, and `URL`. Any other member of these (`Math.random`, `Object.assign`, `new Number(1)`, ...) raises unsupported.
 
-`new URL(input, base)` implements the WHATWG URL parser for the special schemes `http`, `https`, `ws`, `wss`, `ftp` and `file`: relative references, dot segments, percent-encoding, default ports, user info, Windows drive letters in file URLs. The object has `href`, `protocol`, `username`, `password`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`, `toString()` and `toJSON()`, and converts to its `href` as a string. Other schemes, IPv6 hosts, hosts that need IDNA or percent-decoding, numeric hosts other than four decimal parts, and `searchParams` raise `exn:fail:js-expr:unsupported`. An invalid URL raises `TypeError: Invalid URL`.
+`new URL(input, base)` implements the WHATWG URL parser for the special schemes `http`, `https`, `ws`, `wss`, `ftp` and `file`: relative references, dot segments, percent-encoding (the sets Node 22 uses, which leave `^` in a path), default ports, user info, IPv4 hosts in their decimal, octal and hexadecimal forms, percent-escapes in a host, Windows drive letters in file URLs. The object has `href`, `protocol`, `username`, `password`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`, `toString()` and `toJSON()`, and converts to its `href` as a string. Other schemes, IPv6 hosts, hosts that need IDNA (non-ASCII or punycode labels), and `searchParams` raise `exn:fail:js-expr:unsupported`. An invalid URL raises `TypeError: Invalid URL`.
 
 ### 5.3 Errors and the fallback
 
-A JavaScript run-time error (`TypeError`, `ReferenceError`, `RangeError`, `URIError`, the `SyntaxError` of `JSON.parse`) raises `exn:fail:js-expr`; its message starts with the JavaScript error name. An exception raised by a host procedure passes through unchanged. Every message of this family ends with the expression source and, when known, the position.
+A JavaScript run-time error (`TypeError`, `ReferenceError`, `RangeError`, `URIError`, the `SyntaxError` of `JSON.parse`) raises `exn:fail:js-expr`; its message starts with the JavaScript error name. An exception raised by a host procedure passes through unchanged. Every message of this family ends with the expression source (`expression: SOURCE`) and, when known, the position (`position: N`).
 
-Before `js-eval` raises `exn:fail:js-expr:unsupported`, whether from parsing or during evaluation, it consults `(current-js-fallback)`. When that is a procedure, `js-eval` returns `(fallback source env)` instead, so a host can delegate the expression to Node. Evaluation may already have called host procedures by then; expressions in configuration are expected to have no side effects. `js-parse` never consults the fallback.
+Before `js-eval` raises `exn:fail:js-expr:unsupported`, whether from parsing or during evaluation, it consults `(current-js-fallback)`. When that is a procedure, `js-eval` returns `(fallback source env)` instead, so a host can delegate the expression to Node. Evaluation may already have called host procedures by then; expressions in configuration are expected to have no side effects. `js-parse` never consults the fallback, and neither does a call of an arrow function after `js-eval` has returned it.
 
 ## 6. Host objects and the `process` object (`cordis-yaml/js-expr`)
 
@@ -220,20 +225,20 @@ gen:js-object                                  ; generic interface
   #:exec-path [exec-path (find-executable-path "node")]   ; path-string or #f
   #:resolve [resolve #f]                       ; (or/c #f (-> string? string? string?)): specifier, base -> path
   #:homedir [homedir #f]                       ; path-string or #f: HOME from env, then the system home directory
-  #:extra [extra (hash)])                      ; further members, name -> value
+  #:extra [extra (hash)])                      ; further members, name (string) -> value
   -> js-object?
 ```
 
-A struct implements `gen:js-object` to expose a context, a service or any other object lazily: `obj.name` calls `js-get-property`, `obj.name(args)` calls `js-call-method`. Returning `(void)` from `js-get-property` means the property is absent. `make-js-object` builds one from closures.
+A struct implements `gen:js-object` (methods `js-get-property` and, optionally, `js-call-method`) to expose a context, a service or any other object lazily: `obj.name` calls `js-get-property`, `obj.name(args)` calls `js-call-method`. Returning `(void)` from `js-get-property` means the property is absent. `make-js-object` builds one from closures. A host object cannot be enumerated: spreading it, `Object.keys` and `JSON.stringify` (without a `toJSON` function property) raise unsupported.
 
-`make-node-process-object` returns the value to bind as `process`:
+`make-node-process-object` returns the value to bind as `process`. Everything it answers comes from its arguments:
 
-- `env`: an object whose member `NAME` is the variable's string value, or `undefined` when unset. It cannot be enumerated (spreading it or passing it to `JSON.stringify` raises unsupported).
+- `env`: an object whose member `NAME` is the variable's string value, or `undefined` when unset. With `platform` `"win32"` a name given in a hash or jobject is found without regard to case. It cannot be enumerated.
 - `cwd()`: the directory as a string without a trailing separator. `platform`: the string given. `execPath`: the path given; when `exec-path` is `#f`, reading it raises `exn:fail:js-expr`.
 - `getBuiltinModule(id)`, with or without the `node:` prefix:
-  - `path`: `sep`, `delimiter`, `join`, `normalize`, `resolve` (relative to `cwd()`), `dirname`, `basename`, `extname`, `isAbsolute`, with Node's POSIX algorithms. When `platform` is `"win32"` these raise unsupported, because Node would apply its Windows algorithms.
-  - `module`: `createRequire(base)`, whose result has `resolve(specifier)`. It returns `(resolve specifier base)` with `base` as a string (the `href` of a `URL` object). Without a resolver it raises `exn:fail:js-expr`.
-  - `os`: `homedir()`, `tmpdir()`, `platform()`, `EOL`.
+  - `path`: `sep`, `delimiter`, `join`, `normalize`, `resolve` (relative to `cwd()`), `dirname`, `basename`, `extname`, `isAbsolute`, with Node's POSIX algorithms; an argument that is not a string raises `TypeError`. When `platform` is `"win32"` the module raises unsupported, because Node would apply its Windows algorithms.
+  - `module`: `createRequire(base)`, whose result has `resolve(specifier)`. `base` is a file URL object, a file URL string or an absolute path, else `TypeError`. `resolve` returns `(resolve specifier base)` with `base` as a string (the `href` of a `URL` object). Without a resolver it raises `exn:fail:js-expr`.
+  - `os`: `homedir()` (`homedir`, else `HOME`, or `USERPROFILE` on win32, from `env`, else the system home directory), `tmpdir()` (`TMPDIR`, `TMP`, `TEMP` from `env`, else `/tmp`; unsupported on win32), `platform()`, `EOL`.
   - any other id raises unsupported.
 - the members given in `extra` (for example `"version"`).
 - any other member raises unsupported.
@@ -244,6 +249,8 @@ A struct implements `gen:js-object` to expose a context, a service or any other 
 
 - every scalar resolution rule, every escape, block scalar header and chomping case, flow and block collection forms, anchors, tags, directives, document markers, and the position of each error class;
 - the corpus: every `*.yml` file under `packages/`, `apps/` and `snapshots/` of the repository (736 at the pinned commit) parses; reading, writing and reading again yields `equal?` values with expression sources preserved; the test is skipped with a message when the repository tree is not present;
-- every distinct `!!js` expression of the corpus (106) parses and evaluates without `unsupported` under realistic environments, with `ctx` and services as recording host objects;
+- every distinct `!!js` expression of the corpus (106) parses and evaluates without `unsupported` under realistic environments, with `ctx` and its services as recording host objects;
 - each language construct of section 4, each coercion rule and each listed method, and the position reported for unsupported constructs;
-- a differential table checked in as `tests/data/js-yaml-table.rktd` with its generator `tests/gen/gen-js-yaml-table.mjs`: for every corpus file, digests of js-yaml's parse (as JSON) and of js-yaml's dump of it, which the reader and writer must reproduce; hand-written YAML texts with js-yaml's result or error; values with js-yaml's dump text; and expressions with the result Node computed under an equivalent environment. A corpus file whose content no longer matches the digest recorded for it is still checked for parsing and round trip, and is reported as stale without failing.
+- a differential table checked in as `tests/data/js-yaml-table.rktd` with its generator `tests/gen/gen-js-yaml-table.mjs`: for every corpus file, digests of js-yaml's parse (as JSON) and of js-yaml's dump of it, which the reader and writer must reproduce; hand-written YAML texts and texts js-yaml wrote in its other styles, with js-yaml's result or its error reason, position and message; values with js-yaml's dump text, and the values of section 2.4 for which the writer must differ; expressions with the result Node computed under four environments (two real processes, two with `process` replaced for win32 and darwin); texts that Node rejects with `SyntaxError`; and JavaScript that must raise unsupported. The generator checks that js-yaml reads back every dump text in the table to the value it was written from. A corpus file whose content no longer matches the digest recorded for it is still checked for parsing and round trip, and is reported as stale without failing.
+
+`tests/gen/fuzz.rkt` checks a table of any size, for example one the generator wrote with `--fuzz-load 30000`, which adds mutated corpus files whose results, error reasons and positions must agree with js-yaml's.

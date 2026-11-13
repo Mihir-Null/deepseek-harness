@@ -96,13 +96,6 @@
      (format "call of ~a.prototype.~a detached from its object"
              (detached-owner self) (detached-name self)))))
 
-;; One value per method, as JavaScript has one function object per prototype method, so that
-;; 'a'.trim === 'b'.trim holds. The table only ever grows to the number of builtin methods.
-(define detached-methods (make-hash))
-
-(define (detached-method owner name)
-  (hash-ref! detached-methods (cons owner name) (lambda () (detached owner name))))
-
 ;; ---------------------------------------------------------------------------------------------
 ;; Strings
 
@@ -445,7 +438,8 @@
              [(and (flonum? value) (fl= value (flfloor value)))
               (integer->radix-string (fl->exact-integer value) radix)]
              [else
-              (raise-js-unsupported "Number.prototype.toString of a fraction in a radix other than 10")]))]
+              (raise-js-unsupported
+               "Number.prototype.toString of a fraction in a radix other than 10")]))]
     [("valueOf") (lambda (x arguments) (normalize-number x))]
     [else #f]))
 
@@ -457,6 +451,20 @@
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The property protocol
+
+;; One value per implemented method, as JavaScript has one function object per prototype
+;; method, so that 'a'.trim === 'b'.trim holds.
+(define detached-methods
+  (for*/hash ([entry (in-list (list (list "String" string-method string-prototype-names)
+                                    (list "Array" array-method array-prototype-names)
+                                    (list "Number" number-method number-prototype-names)
+                                    (list "Boolean" boolean-method '())))]
+              [name (in-list (append (third entry) object-prototype-names))]
+              #:when ((second entry) name))
+    (values (cons (first entry) name) (detached (first entry) name))))
+
+(define (detached-method owner name)
+  (hash-ref detached-methods (cons owner name)))
 
 (define (string-unit-at s i)
   (define units (string->units s))
@@ -611,7 +619,9 @@
             (if negative? (js-negate magnitude) magnitude)])]))
 
 (define parse-float-pattern
-  #px"^([-+]?)(?:(Infinity)|([0-9]+)(?:\\.([0-9]*))?(?:[eE]([-+]?[0-9]+))?|\\.([0-9]+)(?:[eE]([-+]?[0-9]+))?)")
+  (pregexp (string-append "^([-+]?)(?:(Infinity)"
+                          "|([0-9]+)(?:\\.([0-9]*))?(?:[eE]([-+]?[0-9]+))?"
+                          "|\\.([0-9]+)(?:[eE]([-+]?[0-9]+))?)")))
 
 (define (js-parse-float . arguments)
   (define trimmed (js-trim (js->string (arg arguments 0)) #t #f))

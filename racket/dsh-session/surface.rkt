@@ -126,8 +126,8 @@
 ;; ---- data ----
 
 ;; `rev-nodes` holds the node seqs newest first, so an append is one cons. `forward` caches
-;; the model-visible order once it has been asked for. `projections` holds the definitions
-;; applied so far, newest first.
+;; the model-visible order once it has been asked for, and is #f until then.
+;; `rev-projections` holds the definitions applied so far, newest first.
 (struct surface-state (base-seq
                        next-seq
                        rev-nodes

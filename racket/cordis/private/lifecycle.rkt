@@ -392,12 +392,12 @@
     (dlist-delete! (kernel-runtime-order k) rt)))
 
 (define (ctx-plugin ctx p [config #f])
-  (define pl (if (plugin? p) p (plugin #f '() #f '() p (hasheq) 'own p)))
+  (define pl (if (plugin? p) p (plugin #f '() #f '() p (hasheq) 'own p '())))
   (call/kernel ctx (lambda () (create-fiber! ctx pl config))))
 
 ;; A nameless plugin whose identity is `proc`.
 (define (ctx-inject ctx keys proc)
-  (define pl (plugin #f keys #f '() (lambda (c config) (proc c)) (hasheq) 'own proc))
+  (define pl (plugin #f keys #f '() (lambda (c config) (proc c)) (hasheq) 'own proc '()))
   (call/kernel ctx (lambda () (create-fiber! ctx pl #f))))
 
 (define (create-fiber! ctx pl config)

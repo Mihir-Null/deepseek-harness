@@ -57,7 +57,7 @@ Rules:
 6. `blocking` propagates the thunk's values or exception. If the awaiting task is broken, the helper thread is broken too and then killed if it has not finished within 1 second.
 7. `call-in-kernel` from a non-task thread spawns a task for the thunk, waits with `sync`, and returns `task-result`; from inside a task of the same scheduler it just calls the thunk.
 8. Kill safety: if the baton holder's thread dies, the baton is released. Dead waiters are skipped. Killing any task never prevents other tasks from running.
-9. The manager thread runs under the scheduler's custodian. Task threads are created under the `current-custodian` of the spawner, and inherit its parameterization (so `current-scheduler`, `current-context`, `current-custodian` carry over).
+9. The manager thread runs under the scheduler's custodian. Task threads are created under the `current-custodian` of the spawner, and inherit its parameterization (so `current-context`, `current-custodian` carry over). Inside a task `(current-scheduler)` is the scheduler the task belongs to, also when the spawner named it with `#:scheduler`.
 10. An exception that escapes a task's thunk is stored in the task and re-raised by `task-result` / `await`. If nothing ever observes it, it is logged at `error` level on the `cordis` logger when the task is garbage collected or at scheduler shutdown; an implementation may log eagerly at `debug`.
 11. Holding the baton longer than `(current-baton-warn-ms)` (parameter, default 2000, `#f` disables) between two release points logs a `warning` on the `cordis` logger naming the task.
 
@@ -97,7 +97,7 @@ Rules:
 
 ```racket
 (ctx-effect ctx thunk #:label [label "anonymous"]) -> disposer?
-(effect ctx maybe-label body ...+)                 ; macro; label defaults to "file:line:col"
+(effect ctx maybe-label body ...+)                 ; macro; maybe-label is `#:label label-expr` or a string literal, else the label is "file:line:col" of the form
 (disposer? v) -> boolean?                          ; applicable: (d) -> void?
 (dispose! d) -> void?                              ; same as (d)
 (disposer-label d) -> string?
@@ -111,7 +111,8 @@ Rules:
 - a procedure of arity 0 (including a disposer): one inverse;
 - a list of effect results: collected in order;
 - a generator (from `racket/generator`): resumed until done; each yielded value and the final return value are effect results;
-- a task or other `evt`: awaited; its result is an effect result. Setup is then *asynchronous*: `ctx-effect` returns the disposer immediately without waiting.
+- a fiber: no inverse, and it is not awaited. The fiber is already owned through its `ctx.plugin()` effect, so a thunk or a plugin body may end with a `ctx-plugin` call, as a TypeScript body ends with the statement `ctx.plugin(child)`;
+- a task or other `evt`: awaited; its result is an effect result, except that a synchronization result that is the evt itself (a thread, a semaphore) adds nothing. Setup is then *asynchronous*: `ctx-effect` returns the disposer immediately without waiting.
 
 Anything else raises `exn:fail:contract` ("invalid effect").
 
@@ -150,14 +151,14 @@ Semantics, all from `vendor/cordis/src/fiber.ts`:
 - `ctx-provide` is an effect labelled `ctx.provide("key")`. It assigns `key` a root realm on first use, creates an impl `(uid key value ctx check realm dependents)` with a fresh increasing uid in the realm `key` has in `ctx`, and raises `exn:fail:cordis:service` `service "key" has been registered at <fiber-name>` if that realm is occupied. If the providing fiber is `'active` it notifies. Its inverse removes the impl from the store (if still the current one), notifies, waits until the impl has no dependents, and then removes it from the fiber's provisions.
 - **Notify** for names `ks` from context `c`: for every live plugin fiber that injects one of `ks` and whose context maps that name to the same realm as `c`, re-check the name and refresh the fiber (section 6); then emit `'internal/service` with `(name value)` to listeners whose registering context maps the name to the same realm (value read non-strictly, `#f` if absent).
 - `ctx-get`: realm lookup then store lookup. Returns `default` when there is no impl, or when `strict?` and the provider's fiber is not `'active`. Never raises.
-- `ctx-set!`: replaces the impl's value in place. Raises `exn:fail:cordis:service` `cannot set property "key" without provide` when there is no impl, and `cannot set property "key" in multiple fibers` when called from a different fiber than the provider's. No notification.
+- `ctx-set!` is the property write of `reflect.ts`. For an accessor name it calls the accessor's setter and raises `exn:fail:cordis:service` when the accessor has none. For a name that was never provided it raises `exn:fail:cordis:service` `cannot set property "key" without provide`. For a service name it runs the `'internal/set` waterfall `(ctx name value next)` whose innermost step replaces the impl's value in place; that step raises `cannot set property "key" without provide` when there is no impl, and `cannot set property "key" in multiple fibers` when called from a different fiber than the provider's. No notification.
 - `ctx-ref` is the checked read (paper Algorithm 6):
   1. If `key` has an accessor, call its getter with `ctx`.
   2. If `ctx`'s fiber is the root fiber: return `(ctx-get ctx key #:strict? #f)`; if absent raise as in step 4.
   3. Otherwise run the `'internal/get` waterfall `(ctx key next)` whose innermost step walks from `ctx`'s fiber upward. At each fiber `f`: if `f`'s committed view has `key`, or `f` itself has a provision named `key` in the realm that `key` has in `ctx`, return that value. If `key` is in `f`'s inject list (and was not committed) raise `exn:fail:cordis:inject` `cannot get required service "key" in inactive context`. If `f` is the root, or `f`'s parent context maps `key` to a different realm than `ctx` does, raise as in step 4. Otherwise continue with the parent's fiber.
   4. `exn:fail:cordis:inject` `cannot get property "key" without inject`.
 - `#:check` is `(-> context? any/c)`, called with the *dependent's* context when a dependent's target is computed; a false result or an exception (logged) makes the service count as absent for that dependent.
-- `ctx-accessor` and `ctx-mixin` are effects. A name can be a service or an accessor, not both: `property "name" is already declared as service|accessor`. `ctx-mixin` with source `'timer` and names `'(set-timeout)` makes `(ctx-ref ctx 'set-timeout)` return the member of the service: for a hash-valued service the value at that key; otherwise the result of `((current-mixin-resolver) service-value name)`.
+- `ctx-accessor` and `ctx-mixin` are effects. `getter` is called as `(getter ctx)` with the reading context and `setter` as `(setter ctx value)` with the writing context. A name can be a service or an accessor, not both: `property "name" is already declared as service|accessor`. `ctx-mixin` with source `'timer` and names `'(set-timeout)` makes `(ctx-ref ctx 'set-timeout)` return the member of the service: for a hash-valued service the value at that key; otherwise the result of `((current-mixin-resolver) service-value name)`. The member is read through `(ctx-ref ctx source)` on the reading context, so a mixed-in name needs the access rights of its source, as in `reflect.ts`. `ctx-set!` on a mixed-in name stores the member in a mutable hash-valued service and raises `exn:fail:cordis:service` for any other service value.
 - `service-resolve-config` merges, in order: `base`, the interception layers for `key` from outermost to innermost, `head`. `default-merge` merges hashes right-biased and otherwise takes the last non-`#f` value.
 
 ## 6. Plugins and fibers
@@ -183,12 +184,12 @@ Semantics, all from `vendor/cordis/src/fiber.ts`:
 (fiber-plugin f) -> (or/c plugin? #f)
 (fiber-context f) -> context?                 ; the fiber's own context
 (fiber-parent f) -> (or/c context? #f)        ; the context it was created on
-(fiber-inject f) -> (hash/c symbol? any/c)    ; name -> intercept config or #f
+(fiber-inject f) -> (hash/c symbol? any/c)    ; name -> intercept config or #f; the fiber's own mutable table
 (fiber-committed f) -> (or/c (hash/c symbol? any/c) #f)  ; name -> service value while loaded
 (fiber-provisions f) -> (listof symbol?)
 (fiber-config f) -> any/c                     ; raw config
-(fiber-effective-config f) -> any/c           ; validated config of the current activation
-(fiber-error f) -> (or/c exn? any/c #f)
+(fiber-effective-config f) -> any/c           ; validated config of the current activation; #f before the first
+(fiber-error f) -> (or/c exn? #f)             ; the recorded failure; a raised non-exception value is wrapped
 (fiber-custodian f) -> custodian?
 (fiber-await f) -> fiber?                     ; waits until no transition is in flight; raises the recorded error if 'failed
 (fiber-dispose! f) -> void?                   ; waits for unload
@@ -203,9 +204,9 @@ A fiber is an `evt`, ready when it has no transition in flight; its synchronizat
 
 **Lifecycle.** Implement `vendor/cordis/src/fiber.ts` (`_refresh`, `_setEpoch`, `_reload`, `_unload`, `_checkImpl`, `_updateState`, `update`, `restart`, the disposer in the constructor) on tasks. In particular:
 
-1. `ctx-plugin` raises `exn:fail:cordis:inactive` if `ctx`'s fiber is disposed. It creates the fiber as an effect of the parent fiber labelled `ctx.plugin()`, emits `'internal/plugin` with the fiber (state `'pending`), then checks each injected name and refreshes. It returns without waiting for activation. The plugin body never runs inside the `ctx-plugin` call: reload is a separate task, so code after `ctx-plugin` in the same task runs first.
+1. `ctx-plugin` raises `exn:fail:cordis:inactive` if `ctx`'s fiber is disposed. It creates the fiber as an effect of the parent fiber labelled `ctx.plugin()`, emits `'internal/plugin` with the fiber (state `'pending`), then checks each injected name and refreshes. An observer of that emit may add a dependency with `(hash-set! (fiber-inject f) name config)`. It returns without waiting for activation. The plugin body never runs inside the `ctx-plugin` call: reload is a separate task, so code after `ctx-plugin` in the same task runs first.
 2. The target is `#f` (inactive) or `(list revision provider-uid ...)` in inject order. `refresh` recomputes it; if it changed, the fiber has no recorded error, and no transition is in flight, start a reload task (state `'loading`) when the old target was `#f`, otherwise an unload task (state `'unloading`).
-3. Reload: commit the resolved providers; register as a dependent of each provider not owned by this fiber; create a fresh custodian for this activation unless the plugin's custodian mode is `'inherit`; yield once; if the target is unchanged, validate the config through the `'internal/config` waterfall and run the body. On an exception: log it, and if the target is unchanged record it as the fiber's error and set the target to `#f`. Afterwards, if the target is unchanged the transition ends (state `'active`, or `'failed` when an error is recorded), otherwise chain into unload.
+3. Reload: commit the resolved providers; register as a dependent of each provider not owned by this fiber; create a fresh custodian for this activation unless the plugin's custodian mode is `'inherit`; yield once; if the target is unchanged, validate the config through the `'internal/config` waterfall and run the body. On an exception: log it, and if the target is unchanged record it as the fiber's error and set the target to `#f`. A raised value that is not an exception is first wrapped in an `exn:fail:cordis` whose message is the value's display form, as `utils.ts` wraps a thrown non-error, so `fiber-error` is always an exception or `#f`. Afterwards, if the target is unchanged the transition ends (state `'active`, or `'failed` when an error is recorded), otherwise chain into unload.
 4. Unload: wait until none of this fiber's provisions has dependents; dispose every owned effect, started in reverse registration order, each in its own task, and wait for all, logging failures; shut down the activation's custodian (mode `'own`); remove this fiber from the dependents of its committed providers and wake any provider waiting on that; clear the committed view. Then, if the target is `#f` the transition ends (state `'pending`, or `'disposed` when the fiber was disposed), otherwise chain into reload.
 5. Any state change emits `'internal/status` `(fiber old-state)`. A change into or out of `'active` notifies for every name the fiber provides.
 6. `fiber-dispose!`: clear the uid, emit `'internal/plugin` (each listener's failure is logged and does not stop the others), detach from the registry, set the target to `#f`, unload effects registered while still pending, wait for quiescence. Disposing a parent disposes its children because each child is an effect of the parent.
@@ -213,7 +214,7 @@ A fiber is an `evt`, ready when it has no transition in flight; its synchronizat
 8. `(ctx-on ctx 'internal/update listener)` without `#:global? #t` registers on `ctx`'s fiber only: it sees updates of that fiber alone.
 9. A failed fiber recovers only through `fiber-update!`.
 
-**Config schemas.** `config-schema` is `#f`, or any value applicable to one argument (a procedure, or a struct with `prop:procedure` such as a `cordis-schema` schema) that returns the validated value or raises. Whatever it raises propagates unchanged and is what the fiber records as its error. The kernel itself offers `exn:fail:cordis:validation`, with an `issues` field (a list of `(cons path-list message)`) and the message `invalid config:` followed by one line per issue, `  - message (at a.b.c)`, plus the constructor helper `(raise-validation-error issues)`, for schemas that want the Cordis `ValidationError` text.
+**Config schemas.** `config-schema` is `#f`, or any value applicable to one argument (a procedure, or a struct with `prop:procedure` such as a `cordis-schema` schema) that returns the validated value or raises. Whatever it raises propagates unchanged and is what the fiber records as its error. The kernel itself offers `exn:fail:cordis:validation`, with an `issues` field (a list of `(cons path-list message)`) and the message `invalid config:` followed by one line per issue, `  - message (at a.b.c)`, or `  - message` for an issue with an empty path, plus the constructor helper `(raise-validation-error issues)`, for schemas that want the Cordis `ValidationError` text.
 
 ## 7. Events
 
@@ -237,7 +238,7 @@ A fiber is an `evt`, ready when it has no transition in flight; its synchronizat
 - `serial` and `bail`: call in order, return the first result for which `bailed?` holds, else `(void)`. In Racket both may `await`; they differ only in name, kept for fidelity with declared event modes.
 - `waterfall`: listener `i` is called with `arg ... next`; `(next)` runs the rest of the chain ending in `(inner)` and returns its result. A second call to the same `next` raises `exn:fail:cordis` `next() called multiple times`.
 - `#:filter` is `(-> context? any/c)`, applied to each listener's registering context; listeners registered with `#:global? #t` bypass it.
-- Before a non-internal dispatch, if `'internal/dispatch` has listeners, emit `(mode name args)` to them.
+- Before a non-internal dispatch, if `'internal/dispatch` has listeners, emit `(mode name args)` to them. `mode` is the symbol `'emit`, `'parallel`, `'serial`, `'bail` or `'waterfall`, and for a waterfall `args` ends with the innermost procedure, as in `events.ts`.
 - The listener list used by a dispatch is the list at the time the dispatch starts.
 
 Internal events and their modes: `'internal/plugin` emit `(fiber)`; `'internal/status` emit `(fiber old-state)`; `'internal/service` emit `(name value)`; `'internal/commit` emit `(fiber raw-config)`; `'internal/config` waterfall `(fiber next)`; `'internal/update` waterfall `(fiber resolved-config next)`; `'internal/get` waterfall `(ctx name next)`; `'internal/set` waterfall `(ctx name value next)`; `'internal/listener` bail `(ctx name listener options)`; `'internal/dispatch` emit `(mode name args)`.
@@ -252,7 +253,7 @@ Internal events and their modes: `'internal/plugin` emit `(fiber)`; `'internal/s
 (struct exn:fail:cordis:validation exn:fail:cordis (issues))
 (struct exn:fail:cordis:aggregate exn:fail:cordis (errors))
 (struct exn:fail:cordis:task-killed exn:fail:cordis ())
-(ctx-logger ctx [topic #f]) -> logger?          ; child of the 'cordis logger, named after the fiber
+(ctx-logger ctx [topic #f]) -> logger?          ; child of the 'cordis logger, named `topic` or the hyphenated fiber name (`MyPluginName` -> `my-plugin-name`)
 (log-ctx level ctx fmt arg ...)                 ; macro; level is debug|info|warning|error|fatal
 cordis-logger                                   ; the root logger, topic 'cordis
 ```
@@ -269,7 +270,7 @@ All use `syntax/parse` with messages that name the offending clause.
         (~optional (~seq #:inject (inject-clause ...)))
         (~optional (~seq #:config schema-expr))
         (~optional (~seq #:provides (key-id ...)))
-        (~optional (~seq #:custodian mode))
+        (~optional (~seq #:custodian mode))          ; own, inherit, or an expression that produces 'own or 'inherit
         (~optional (~seq #:meta meta-expr))) ...
   body)
 ;; inject-clause = key-id | [key-id #:optional] | [key-id #:as local-id] | [key-id #:intercept expr]
@@ -279,7 +280,7 @@ All use `syntax/parse` with messages that name the offending clause.
 - Defines `id` as a `plugin?`.
 - In the `lambda` and `(ctx-id config-id) e ...` body forms, each required injected key is bound as a variable holding `(service-handle ctx 'key)`. An `#:optional` key is not part of the inject list; its identifier is a macro that expands to `(ctx-get ctx 'key)` at each use (the raw value or `#f`).
 - Duplicate keys, unknown keywords and a non-lambda body without `#:apply` are syntax errors with specific messages.
-- `(plugin-info p)` returns a hash with `'name`, `'inject`, `'optional`, `'provides`, `'config-schema`.
+- `(plugin-info p)`, exported from `cordis/plugin`, accepts any `plugin?` and returns an immutable hash with `'name` (a string or `#f`), `'inject` (the required keys), `'optional`, `'provides` (each a list of key symbols in declaration order) and `'config-schema`. For a plugin made by `make-plugin`, `'optional` is `'()`.
 
 ```racket
 (define-service id maybe-key
@@ -325,3 +326,4 @@ These were added after the first implementation started, from the reconnaissance
 2. **Listener resolution without dispatch.** `(ctx-dispatch-callbacks ctx mode name args #:filter [filter #f]) -> (listof procedure?)` returns, in dispatch order, the listeners that a dispatch of `name` from `ctx` would call, after emitting `'internal/dispatch` exactly as a real dispatch does. Each returned procedure, when applied to the dispatch arguments, calls the listener with `current-context` set to its registering context. This is Cordis's `events.dispatch(type, args)`. Callers use it to resolve the audience before committing a state change and then to call each listener with its own error containment (the session store's append and `tools/result` need this). `ctx-listeners` remains the plain, unfiltered introspection.
 3. **Inheritance through fibers.** A fiber's context is derived from the context `ctx-plugin` was called on, so it inherits that context's meta, realms and interception layers. `(context-meta (fiber-context f) key)` therefore sees meta set on any ancestor context. The loader records the entry id of the row that mounted a plugin under the meta key `'loader/entry-id`.
 4. **Contained calls.** `(call-contained ctx thunk #:label [label #f]) -> any` calls `thunk`; if it raises an `exn:fail`, logs it at `error` on `ctx`'s logger with `label` and returns `(void)`. Breaks and non-`exn:fail` raises propagate. It is the kernel's own containment rule (used for `'internal/plugin` teardown notifications and disposers) offered to services that must isolate one listener from the next.
+5. **Recorded differences from the TypeScript.** The rules below state behaviour that differs from `vendor/cordis/src`; the quirk numbers are those of [recon/01-cordis-core.md](../recon/01-cordis-core.md). The implementation and the specification suite follow this document for them. The rule in the introduction that the TypeScript decides behaviour applies to everything else. Section 4 rule 3: after an inverse raises, the remaining inverses of the effect still run and the first exception is re-raised (TypeScript skips the rest, quirk 14). Section 4 rule 4: a second disposer call waits for the first (TypeScript returns at once, quirk 6). Section 4 rule 6: an asynchronous setup failure is logged (TypeScript is silent, quirk 5). Section 4 rule 9: the guard is checked before every generator resume (TypeScript drains a synchronous iterator without checking). Section 5, `ctx-ref` step 2: a root-fiber read of a key without an impl raises (TypeScript returns `undefined`). Section 4, effect results: a fiber is accepted and ignored (TypeScript has no value for a statement, and a body that returns the fiber object fails with `Invalid effect`).

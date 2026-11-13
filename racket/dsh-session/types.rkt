@@ -30,9 +30,9 @@
                      "private/names.rkt"
                      "private/event-syntax.rkt"))
 
-;; A value for an optional keyword: `absent`, or one that satisfies `c`.
+;; A value for an optional keyword: `absent` or #f for "not given", or one that satisfies `c`.
 (define (maybe/c c)
-  (or/c absent? c))
+  (or/c absent? #f c))
 
 (define surface-op/c
   (or/c 'append surface-replace?))
@@ -110,6 +110,7 @@
   ;; envelope".
   [jvalue->session-event (->* (any/c) (#:subject string?) session-event?)]
   ;; Key order: type, seq, time, data, the metadata keys in the selected order, ignorable.
+  ;; `absent` and #f both leave a metadata key out.
   [make-session-event
    (->* (string? session-seq? (and/c exact-integer? safe-integer?) jvalue?)
         (#:sources (maybe/c (listof session-seq?))

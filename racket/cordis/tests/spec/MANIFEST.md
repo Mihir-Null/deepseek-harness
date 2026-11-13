@@ -2,16 +2,18 @@
 
 This directory holds an independent black-box test suite for the `cordis` kernel package. It was written from the interface contract ([docs/racket/contracts/cordis-kernel.md](../../../../docs/racket/contracts/cordis-kernel.md)), the vendored TypeScript kernel (`vendor/cordis/src`), the kernel reconnaissance note ([docs/racket/recon/01-cordis-core.md](../../../../docs/racket/recon/01-cordis-core.md)) and the paper digest ([docs/racket/recon/19-paper-digest.md](../../../../docs/racket/recon/19-paper-digest.md)), without reading the implementation. It uses only the public modules `cordis`, `cordis/task`, `cordis/plugin` and `cordis/testing`.
 
-Run it with `raco make racket/cordis/tests/spec/*.rkt` followed by `raco test racket/cordis/tests/spec`. The suite has 215 test cases in nine files; `support.rkt` holds shared helpers and has no test case.
+Run it with `raco make racket/cordis/tests/spec/*.rkt` followed by `raco test racket/cordis/tests/spec`. The suite has 216 test cases in nine files; `support.rkt` holds shared helpers and has no test case.
 
-The suite was written without running it against the implementation. Each file was checked to read as well-formed syntax and to compile without unbound identifiers against a compile-only stand-in that exports the names of contract sections 2 to 8 and 10 and nothing else.
+The suite was written without reading or running the implementation. Each file was checked to read as well-formed syntax and to compile without unbound identifiers against a compile-only stand-in that exports the names of contract sections 2 to 8 and 10 and nothing else.
+
+The suite was then run against a reference model kept outside the repository: a transcription of `vendor/cordis/src` onto a baton scheduler with the surface of the contract. All 216 cases pass on it. Of 41 deliberately wrong variants of the model, 38 fail at least one case; the other three do not change behaviour that the public API can observe. The cases also pass on variants that yield more often, that give the root fiber an activation custodian, and that build `kernel-snapshot` from realm symbols.
 
 The suite follows the contract as of its section 12 addenda: cooperative breaks and `task-check-break` (addendum 1), `ctx-dispatch-callbacks` (addendum 2), inheritance through fibers (addendum 3) and `call-contained` (addendum 4).
 
 ## How the suite sequences and bounds its tests
 
 - No test outcome depends on how long anything takes. Tasks are sequenced with gates (semaphores), `await`, `yield-task` and task results.
-- Every wait is bounded. Kernel tests run inside `with-root`, which is `call-with-root-context` with `#:timeout 30`; task tests wait with `sync/timeout`. A timeout is a failure bound only.
+- Every wait is bounded. Kernel tests run inside `with-root`, which is `call-with-root-context` with `#:timeout 30`; task tests wait with `sync/timeout`, inside `run-task`, or through `call-bounded` when the operation under test must be made from a thread that is not a task. A timeout is a failure bound only.
 - A check that runs inside a plugin body, a listener or an inverse would be swallowed by kernel containment, so those places record observations and the test body checks the record.
 - A TypeScript call that returns a promise (`update`, `restart`, `dispose`, a disposer with an asynchronous inverse) blocks its caller in the Racket contract. A test that needs such a call in flight runs it in its own task.
 - Names that the contract mentions only in prose (`current-baton-warn-ms`, `current-mixin-resolver`, `default-merge`, `raise-validation-error`, `plugin-info`) and names that section 12 added after the first implementation started (`task-check-break`, `ctx-dispatch-callbacks`, `call-contained`) are looked up with `dynamic-require`, so that a missing export fails one test case instead of one file.
@@ -152,7 +154,7 @@ In the tables below, "contract N" is a section of the kernel contract, "recon 01
 | case 4: own isolated provision versus committed injection | scripts/cordis-core-lifecycle.spec.ts "separates own isolated provisions from the committed injection" (recon case 4) |
 | S21: an effect registered through a caller's handle belongs to the caller | recon 01 S21 and "Use site and definition site" items 4 and 5, in the form of ADR 0003 |
 
-### `fiber-spec-test.rkt` (39 cases)
+### `fiber-spec-test.rkt` (40 cases)
 
 | Test case | Source |
 |---|---|
@@ -195,6 +197,7 @@ In the tables below, "contract N" is a section of the kernel contract, "recon 01
 | S13: an update resolves the config for the candidate and again for the activation | recon 01 S13, "double resolution during an update"; fiber.ts update (candidate resolution) and _execute (activation resolution) |
 | fiber/context: a fiber's context inherits meta, realms and intercept layers | contract 12 addendum 3 |
 | context/threads: kernel operations may be called from a plain thread | contract 3, "Every public kernel operation that mutates state may be called from any thread"; contract 2 rule 5 (await of a fiber outside a task) and rule 7 |
+| S27 (reduced): ctx-logger is a child of the cordis logger named after the fiber | recon 01 S27, reduced to contract 8, `ctx-logger`; logger.ts default name |
 
 ### `lifecycle-spec-test.rkt` (18 cases)
 
@@ -318,7 +321,7 @@ Each entry names what was not ported and why.
 | S18, "await effect yields a non-thenable function" | Thenable machinery. Contract section 4 rule 8 replaces it and is tested. |
 | S21, "getter sees the caller", `instanceof` | Tracing proxies and `Symbol.hasInstance`. The ownership and definition-site parts are ported in the form of ADR 0003. |
 | S23, runtime record identity (`registry.has`, `registry.delete`, one runtime for a shared `apply`, the `apply2` name rule) | The registry service is not in the contract. One fiber per `ctx-plugin` call, uid order and name inheritance are tested in "fiber/surface". |
-| S27, Logger service | `LoggerService` (hyphenated default names, level thresholds, `cause` and `AggregateError` expansion, buffer, `sn`) is replaced by Racket loggers; contract section 8 has `ctx-logger` only. The rule tests assert error logging through `capture-log`. |
+| S27, Logger service, except the default logger name | `LoggerService` (intercept names, level thresholds, `cause` and `AggregateError` expansion, buffer, `sn`) is replaced by Racket loggers; contract section 8 has `ctx-logger` only, which "S27 (reduced)" tests. The rule tests assert error logging through `capture-log`. |
 | S29, class plugins | Classes, decorator-inherited `inject` and `[Service.init]` are JavaScript machinery. Generator bodies, visibility after activation and reverse cleanup are tested elsewhere. |
 | S30, callable service, `[Service.extend]`, associated `"call.extra"` accessor | Callable objects built by prototype surgery and dotted proxy access. |
 | Loader-level and tooling specs (`cordis-timer`, `cordis-entry-commit`, `cordis-include-journal`, `cordis-loader-resolve`, `cordis-vendor-hmr-include`, `cordis-core-api`, `cordis-config-files`, `gen-cordis-catalog-partition`, `verify-cordis-config`) | The recon note lists them at catalog depth as belonging to other packages; none tests kernel behaviour. |
@@ -357,4 +360,5 @@ A failure in one of these places may be a difference of reading, not a kernel de
 11. A record returned by `capture-log` is assumed to be the vector a Racket log receiver produces: level, message, data, topic. Kernel error logs are captured with `#:topic 'cordis`; the `call-contained` test uses its own receiver for every topic under `cordis-logger`, because addendum 4 says "on `ctx`'s logger" and leaves the topic open.
 12. `ctx-dispatch-callbacks` takes the mode as a symbol, like `ctx-dispatch`, and a returned procedure returns the listener's result, as a bound callback does in `events.ts`.
 13. `call-with-root-context` is assumed to run its procedure in a task whose custodian outlives a restart of the root fiber, and to re-raise what the procedure raises. Cases 9, 11 and 13 and S28 restart or dispose the root from that task.
-14. The rule 11 test holds the baton with `sleep` for 50 ms against a 1 ms threshold. The rule is about elapsed time between two release points, so this one outcome rests on a clock by definition; the test waits on events and has no other dependence on timing.
+14. Law 21 expects a committed view to cover every injected key whenever the view is present, which is what the digest states and what `fiber.ts` gives by capturing the view in the step that computes the target. A kernel that captures the view later, at the start of the reload task, must capture the resolution the task was started for; a view taken from providers that have since left fails the law in a few schedules.
+15. The rule 11 test holds the baton with `sleep` for 50 ms against a 1 ms threshold. The rule is about elapsed time between two release points, so this one outcome rests on a clock by definition; the test waits on events and has no other dependence on timing.

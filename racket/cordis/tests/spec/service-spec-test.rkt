@@ -203,7 +203,8 @@
     (check-regexp-match #rx"cannot get property \"absent\" without inject" (exn-message e))
     (check-eq? (exn:fail:cordis:inject-key e) 'absent)
     (gate-open! gate)
-    (await provider)))
+    (await provider)
+    (check-eq? (fiber-state provider) 'active)))
 
 ;; source: contract 5, ctx-ref step 3; reflect.ts handler.get; recon 01 S6
 (test-case "service/ref step 3: visibility follows injections and provisions up the fiber chain"

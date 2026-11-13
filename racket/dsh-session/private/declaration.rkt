@@ -100,8 +100,9 @@
   (when (event-declaration-surface? t)
     (unless (or (eq? op 'append) (surface-replace? op))
       (raise-argument-error who "(or/c 'append surface-replace?)" op))
-    (unless (or (absent? sources) (and (list? sources) (andmap session-seq? sources)))
-      (raise-argument-error who "(listof session-seq?)" sources))))
+    (unless (or (absent? sources) (not sources)
+                (and (list? sources) (andmap session-seq? sources)))
+      (raise-argument-error who "(or/c #f (listof session-seq?))" sources))))
 
 ;; The input value for checked data: a plugin record input for an ignorable declaration, an
 ;; event input otherwise.

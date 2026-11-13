@@ -92,8 +92,9 @@
   (make-struct-type-property 'config-schema))
 
 ;; `key` is the registry identity (`eq?`): the apply procedure, or for `ctx-inject` the
-;; callback. `inject` is the declaration as given, with symbol keys.
-(struct plugin (name inject config-schema provides apply meta custodian-mode key)
+;; callback. `inject` is the declaration as given, with symbol keys. `optional` lists the
+;; services a `define-plugin` body reads when they exist; they are not injected.
+(struct plugin (name inject config-schema provides apply meta custodian-mode key optional)
   #:property prop:procedure
   (lambda (p ctx config) ((plugin-apply p) ctx config))
   #:property prop:custom-write

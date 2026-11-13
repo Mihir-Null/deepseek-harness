@@ -12,8 +12,7 @@
 
 ;; reason : string. source : the #:source name or #f. line, column : 1-based, or #f.
 ;; position : 0-based character offset, or #f.
-(struct exn:fail:yaml exn:fail (reason source line column position)
-  #:transparent)
+(struct exn:fail:yaml exn:fail (reason source line column position))
 
 ;; raise-yaml-error : string? any/c string? fixnum fixnum fixnum -> none
 ;; `buffer` is the text being read; `line` is 0-based and `line-start` is the offset of the

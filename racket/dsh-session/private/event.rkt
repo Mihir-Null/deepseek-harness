@@ -132,6 +132,11 @@
     (reject))
   (view envelope))
 
+;; `absent` and #f both mean that a surface operation or a source list is not given, so the
+;; result of an input accessor can be passed on as it is. The empty list is a given list.
+(define (not-given? v)
+  (or (absent? v) (not v)))
+
 ;; make-session-event : string? session-seq? exact-integer? jvalue? ... -> session-event?
 ;; Key order: type, seq, time, data, then the two metadata keys in the order `order` selects
 ;; (`sourceEventSeqs` first for a live append, `surfaceOp` first for a synthetic recovery
@@ -144,9 +149,9 @@
                             #:ignorable? [ignorable? #f]
                             #:metadata-order [order 'sources-first])
   (define source-members
-    (if (absent? sources) '() (list (cons 'sourceEventSeqs sources))))
+    (if (not-given? sources) '() (list (cons 'sourceEventSeqs sources))))
   (define op-members
-    (if (absent? op) '() (list (cons 'surfaceOp (surface-op->jvalue op)))))
+    (if (not-given? op) '() (list (cons 'surfaceOp (surface-op->jvalue op)))))
   (view
    (make-jobject
     (append (list (cons 'type (string->immutable-string type))
@@ -170,8 +175,8 @@
 (define (make-session-event-input type data #:surface-op [op absent] #:sources [sources absent])
   (session-event-input (string->immutable-string type)
                        data
-                       (if (absent? op) #f op)
-                       (if (absent? sources) #f sources)))
+                       (if (not-given? op) #f op)
+                       (if (not-given? sources) #f sources)))
 
 ;; ---- plugin records ----
 

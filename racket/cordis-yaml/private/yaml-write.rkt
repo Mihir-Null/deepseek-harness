@@ -255,8 +255,14 @@
           [else (write-string (encode-hex n) out)]))
   (get-output-string out))
 
-;; write-scalar : the text of string `str` as a scalar at nesting `level`.
-(define (write-scalar str level key? in-block? line-width)
+;; write-scalar : the text of string `str` as a scalar at nesting `level`. `root?` says that
+;; the scalar is the whole document, `line-start?` that it starts at the first column.
+;;
+;; In three cases js-yaml writes a text that it does not read back, and this writer picks
+;; another style: a plain scalar at the first column that begins like the document end marker
+;; "..." is single-quoted, and a root block scalar that is all line breaks, or that needs an
+;; indentation indicator, is double-quoted.
+(define (write-scalar str level key? in-block? line-width root? line-start?)
   (cond
     [(string=? str "") "''"]
     [(or (member str deprecated-booleans) (regexp-match? deprecated-base60 str))
@@ -265,15 +271,27 @@
      (define indent (* indent-per-level (max 1 level)))
      ;; The width shrinks with the indentation down to min(line-width, 40).
      (define width (and line-width (max (min line-width 40) (- line-width indent))))
-     (case (choose-scalar-style str key? width in-block?)
-       [(plain) str]
-       [(single) (string-append "'" (string-replace str "'" "''") "'")]
-       [(literal)
-        (string-append "|" (block-header str) (drop-ending-newline (indent-string str indent)))]
-       [(folded)
-        (string-append ">" (block-header str)
-                       (drop-ending-newline (indent-string (fold-string str width) indent)))]
-       [else (string-append "\"" (escape-string str) "\"")])]))
+     (define (single-quoted) (string-append "'" (string-replace str "'" "''") "'"))
+     (define (double-quoted) (string-append "\"" (escape-string str) "\""))
+     (define style (choose-scalar-style str key? width in-block?))
+     (case style
+       [(plain)
+        ;; A key is followed by its colon, so only "... " can be taken for the marker there.
+        (if (and line-start?
+                 (regexp-match? (if key? #rx"^[.][.][.] " #rx"^[.][.][.]($| )") str))
+            (single-quoted)
+            str)]
+       [(single) (single-quoted)]
+       [(literal folded)
+        (cond
+          [(and root? (or (need-indent-indicator? str) (regexp-match? #rx"^\n+$" str)))
+           (double-quoted)]
+          [(eq? style 'literal)
+           (string-append "|" (block-header str) (drop-ending-newline (indent-string str indent)))]
+          [else
+           (string-append ">" (block-header str)
+                          (drop-ending-newline (indent-string (fold-string str width) indent)))])]
+       [else (double-quoted)])]))
 
 (define (number->yaml n)
   (define x (if (flonum? n) n #f))
@@ -304,18 +322,19 @@
 (define (dump-yaml value line-width)
   ;; write-node : the text of `v` at `level`. `compact?` lets a block collection start on the
   ;; line of its parent's "- ". `path` is the reverse path of `v`, for the error message.
-  (define (write-node v level compact? key? path)
+  ;; `root?` says that `v` is the document, `line-start?` that its text starts a line.
+  (define (write-node v level compact? key? path [root? #f] [line-start? #f])
     (cond
-      [(string? v) (write-scalar v level key? #t line-width)]
+      [(string? v) (write-scalar v level key? #t line-width root? line-start?)]
       [(eq? v 'null) "null"]
       [(eq? v #t) "true"]
       [(eq? v #f) "false"]
       [(real? v) (number->yaml v)]
       [(js-expr? v)
-       (string-append "!!js " (write-scalar (js-expr-source v) level key? #t line-width))]
+       (string-append "!!js " (write-scalar (js-expr-source v) level key? #t line-width root? #f))]
       [(marker-source v)
        => (lambda (source)
-            (string-append "!!js " (write-scalar source level key? #t line-width)))]
+            (string-append "!!js " (write-scalar source level key? #t line-width root? #f)))]
       [(list? v)
        (if (null? v) "[]" (write-block-sequence v level compact? path))]
       [(object? v)
@@ -342,7 +361,8 @@
     (for ([(key item) (in-jobject obj)] [index (in-naturals)])
       (unless (and compact? (zero? index))
         (write-string (next-line level) out))
-      (define key-text (write-node (symbol->string key) (add1 level) #t #t path))
+      ;; The keys of the root mapping start at the first column.
+      (define key-text (write-node (symbol->string key) (add1 level) #t #t path #f (zero? level)))
       ;; A very long key is written in the explicit "? key" form.
       (define explicit? (> (utf16-length key-text) 1024))
       (when explicit?
@@ -353,4 +373,4 @@
       (write-string (if (starts-with-newline? text) ":" ": ") out)
       (write-string text out))
     (get-output-string out))
-  (string-append (write-node value 0 #t #f '()) "\n"))
+  (string-append (write-node value 0 #t #f '() #t #t) "\n"))

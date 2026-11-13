@@ -130,8 +130,9 @@
   (let loop ([i 0])
     (when (< i len)
       (define b (bytes-ref bytes i))
-      (define high (and (= b 37) (< (+ i 2) len) (hex-digit (integer->char (bytes-ref bytes (+ i 1))))))
-      (define low (and high (hex-digit (integer->char (bytes-ref bytes (+ i 2))))))
+      (define (digit-at j) (hex-digit (integer->char (bytes-ref bytes j))))
+      (define high (and (= b 37) (< (+ i 2) len) (digit-at (+ i 1))))
+      (define low (and high (digit-at (+ i 2))))
       (cond [low
              (write-byte (+ (* 16 high) low) out)
              (loop (+ i 3))]

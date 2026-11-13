@@ -18,17 +18,18 @@
   ;; Expands pairs. `max-entries` bounds the length of the result.
   [decode-seq-ranges (->* (any/c) (exact-nonnegative-integer?) (listof session-seq?))]))
 
-(define (strictly-increasing? values)
-  (or (null? values)
-      (for/and ([previous (in-list values)] [next (in-list (cdr values))])
+;; `seqs` is a list of exact integers.
+(define (strictly-increasing? seqs)
+  (or (null? seqs)
+      (for/and ([previous (in-list seqs)] [next (in-list (cdr seqs))])
         (> next previous))))
 
 ;; source: packages/core/session/src/seq-ranges.ts (encodeSeqRanges)
-(define (encode-seq-ranges values)
+(define (encode-seq-ranges seqs)
   (cond
-    [(not (strictly-increasing? values)) values]
+    [(not (strictly-increasing? seqs)) seqs]
     [else
-     (let loop ([rest values] [encoded '()])
+     (let loop ([rest seqs] [encoded '()])
        (cond
          [(null? rest) (reverse encoded)]
          [else

@@ -17,16 +17,13 @@
 
 ;; source : the expression text, or #f when raised outside an evaluation.
 ;; position : 0-based character offset in `source`, or #f.
-(struct exn:fail:js-expr exn:fail (source position)
-  #:transparent)
+(struct exn:fail:js-expr exn:fail (source position))
 
 ;; The text is not JavaScript.
-(struct exn:fail:js-expr:syntax exn:fail:js-expr ()
-  #:transparent)
+(struct exn:fail:js-expr:syntax exn:fail:js-expr ())
 
 ;; The text is JavaScript that this evaluator does not implement. construct : string.
-(struct exn:fail:js-expr:unsupported exn:fail:js-expr (construct)
-  #:transparent)
+(struct exn:fail:js-expr:unsupported exn:fail:js-expr (construct))
 
 ;; The mark's value is (cons source position).
 (define js-site-key (make-continuation-mark-key 'js-site))

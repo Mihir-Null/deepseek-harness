@@ -97,6 +97,10 @@
             (throw-error s "the stream contains non-printable characters"))))
     (write-string input out start end)))
 
+;; The text accumulated in `out`, as the immutable string a scalar node holds.
+(define (scalar-text out)
+  (string->immutable-string (get-output-string out)))
+
 (define (write-folded-lines! out count)
   (cond [(= count 1) (write-char #\space out)]
         [(> count 1) (write-string (make-string (sub1 count) #\newline) out)]))
@@ -222,7 +226,7 @@
              (set-st-line-indent! s line-indent)
              (finish capture-start capture-end)])]
          [else (content)]))
-     (define text (get-output-string out))
+     (define text (scalar-text out))
      (cond [(string=? text "")
             (set-st-kind! s saved-kind)
             (set-st-result! s saved-result)
@@ -250,7 +254,7 @@
                  (define start (pos s))
                  (advance! s)
                  (loop start (pos s))]
-                [else (set-st-result! s (get-output-string out))])]
+                [else (set-st-result! s (scalar-text out))])]
          [(eol? c)
           (capture-segment! s out capture-start capture-end #t)
           (write-folded-lines! out (skip-separation-space! s #f))
@@ -322,7 +326,7 @@
           (capture! capture-start (pos s))
           (flush-high!)
           (advance! s)
-          (set-st-result! s (get-output-string out))]
+          (set-st-result! s (scalar-text out))]
          [(char=? c #\\)
           (capture! capture-start (pos s))
           (advance! s)
@@ -448,7 +452,7 @@
                 (scan)))
             (capture-segment! s out capture-start (pos s) #f)
             (loop #t text-indent* #t 0 more-indented?)])))
-     (set-st-result! s (get-output-string out))
+     (set-st-result! s (scalar-text out))
      #t]))
 
 ;; ---------------------------------------------------------------------------------------------

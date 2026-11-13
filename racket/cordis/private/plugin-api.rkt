@@ -55,4 +55,5 @@
           apply
           meta
           mode
-          apply))
+          apply
+          '()))

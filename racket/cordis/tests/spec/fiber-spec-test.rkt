@@ -102,7 +102,8 @@
     (define f (ctx-inject ctx '(svc) void))
     (check-equal? (notes seen) '((pending #t #t #f)))
     (check-eq? (fiber-state f) 'loading)
-    (await f)))
+    (await f)
+    (check-eq? (fiber-state f) 'active)))
 
 ;; source: contract 6, fiber accessors; recon 01 S23 (uids, names)
 (test-case "fiber/surface: uid, name, plugin, parent, context, config and ctx-fibers"

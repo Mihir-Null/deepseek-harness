@@ -187,9 +187,9 @@
         [(symbol? v) (symbol->string v)]
         [else v]))
 
-;; A binding that the contract names only in prose, or added after the first
-;; implementation started (contract 12). #f when the module does
-;; not export it, so that one missing name fails one test case, not a file.
+;; A binding that the contract names only in prose, or that contract section
+;; 12 added after the first implementation started. #f when the module does not
+;; export it, so that one missing name fails one test case, not a file.
 (define (optional-binding mod name)
   (dynamic-require mod name (lambda () #f)))
 

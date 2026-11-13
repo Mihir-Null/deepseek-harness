@@ -1,7 +1,8 @@
 #lang racket/base
 ;; Provides ECMAScript's URI coding functions on Racket strings: `uri-decode` (decodeURI and
-;; decodeURIComponent) and `uri-encode` (encodeURI and encodeURIComponent). Both return #f
-;; where JavaScript throws URIError.
+;; decodeURIComponent), which returns #f where JavaScript throws URIError, and `uri-encode`
+;; (encodeURI and encodeURIComponent), which cannot fail because a Racket string holds no lone
+;; surrogate.
 
 (provide uri-decode
          uri-encode

@@ -744,7 +744,8 @@
     [(memq (token-type t) '(str num))
      (advance! p)
      (reject-method!)
-     (define name (if (string? (token-value t)) (token-value t) (js-number->string (token-value t))))
+     (define name
+       (if (string? (token-value t)) (token-value t) (js-number->string (token-value t))))
      (node p position 'prop name (value-after-colon))]
     [(memq (token-type t) '(id kw))
      (define name (token-value t))

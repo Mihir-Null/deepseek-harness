@@ -7,8 +7,7 @@
 ;; result is `role, source, toolCallId, content, isError, id`). Message ids are explicit, or
 ;; taken from a per-builder counter when omitted.
 
-(require racket/list
-         cordis-data
+(require cordis-data
          dsh-session/types
          dsh-session/events)
 
