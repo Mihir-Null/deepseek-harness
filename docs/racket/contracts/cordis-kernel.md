@@ -316,3 +316,12 @@ Defines: `id-name` (the symbol), `(on-id ctx listener #:prepend? [p #f])`, and e
 ## 11. Required tests
 
 The package's own suite (`racket/cordis/tests/`) must cover every numbered rule in sections 2 and 4 to 7 and the fifteen laws in section 7 of the analysis, and must pass under `raco test racket/cordis`. Tests must not depend on wall-clock ordering; use events, not sleeps, to sequence tasks.
+
+## 12. Addenda
+
+These were added after the first implementation started, from the reconnaissance of Racket mechanisms and from the wave 3 architects. They are part of the contract.
+
+1. **Cooperative breaks** (section 2, rule 4 as now written, and `task-check-break`).
+2. **Listener resolution without dispatch.** `(ctx-dispatch-callbacks ctx mode name args #:filter [filter #f]) -> (listof procedure?)` returns, in dispatch order, the listeners that a dispatch of `name` from `ctx` would call, after emitting `'internal/dispatch` exactly as a real dispatch does. Each returned procedure, when applied to the dispatch arguments, calls the listener with `current-context` set to its registering context. This is Cordis's `events.dispatch(type, args)`. Callers use it to resolve the audience before committing a state change and then to call each listener with its own error containment (the session store's append and `tools/result` need this). `ctx-listeners` remains the plain, unfiltered introspection.
+3. **Inheritance through fibers.** A fiber's context is derived from the context `ctx-plugin` was called on, so it inherits that context's meta, realms and interception layers. `(context-meta (fiber-context f) key)` therefore sees meta set on any ancestor context. The loader records the entry id of the row that mounted a plugin under the meta key `'loader/entry-id`.
+4. **Contained calls.** `(call-contained ctx thunk #:label [label #f]) -> any` calls `thunk`; if it raises an `exn:fail`, logs it at `error` on `ctx`'s logger with `label` and returns `(void)`. Breaks and non-`exn:fail` raises propagate. It is the kernel's own containment rule (used for `'internal/plugin` teardown notifications and disposers) offered to services that must isolate one listener from the next.
