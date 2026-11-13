@@ -48,6 +48,8 @@ Default export of `@deepseek-ai/dsh-llm`. A Service class (`extends TypertRemote
 
 Ownership rules: every registration is an effect bound to the registering fiber; disposing the fiber removes the routes, the directory entries, or the discovery offer. A route belongs to exactly one adapter instance. The retry policy is a snapshot taken at registration (or `replace`), not read per request.
 
+Model selection. `GenerateOptions.provider` selects the adapter and nothing else; `GenerateOptions.model` is passed through to it, so any model id is routable on a registered provider. The catalog from `listModels` is advisory: core resolution and streaming accept unlisted ids, while catalog-driven surfaces (the GUI) restrict selection to listed models. Which provider and model an agent uses is session state owned by the core agent packages (the base bundle sets `provider: deepseek-official`, `model: deepseek-flash` through `@deepseek-ai/dsh-agent-default-model`); this area only validates and prepares the chosen route. Reasoning effort is an opaque per-model id: each adapter lists its own efforts in increasing order with an optional default, and the runtime validates membership without clamping.
+
 ### The adapter seam — `LlmAdapter` (`packages/llm/llm/src/index.ts:223`)
 
 Abstract class; only `stream` is required. Defaults in parentheses.
@@ -351,7 +353,13 @@ pi-ai only: a later `system` message on a model without mid-conversation system 
 
 ### 6. App attribution (`packages/llm/llm/src/attribution.ts`)
 
-`APP_IDENTITY = {product: 'deepseek-harness', version: <dsh-llm package.json version>, url: 'https://github.com/deepseek-ai/deepseek-harness', suffix}` where `suffix` reads environment variable `DSH_USER_AGENT_SUFFIX` on every use (unset or empty means none; a value not matching the RFC 9110 product pattern `^[!#$%&'*+.^_\`|~0-9A-Za-z-]+(?:/[!#$%&'*+.^_\`|~0-9A-Za-z-]+)?$` throws `DSH_USER_AGENT_SUFFIX must be an RFC 9110 product token; got "..."`). `userAgent()` is `product/version (+url)` plus ` suffix` when present, for example `deepseek-harness/0.2.2-rc.2 (+https://github.com/deepseek-ai/deepseek-harness) dsh-profile/web`. `attributionHeaders()` returns `{'user-agent': userAgent()}`.
+`APP_IDENTITY = {product: 'deepseek-harness', version: <dsh-llm package.json version>, url: 'https://github.com/deepseek-ai/deepseek-harness', suffix}` where `suffix` reads environment variable `DSH_USER_AGENT_SUFFIX` on every use (unset or empty means none; a value not matching the RFC 9110 product pattern below throws `DSH_USER_AGENT_SUFFIX must be an RFC 9110 product token; got "..."`).
+
+```text
+^[!#$%&'*+.^_`|~0-9A-Za-z-]+(?:\/[!#$%&'*+.^_`|~0-9A-Za-z-]+)?$
+```
+
+`userAgent()` is `product/version (+url)` plus ` suffix` when present, for example `deepseek-harness/0.2.2-rc.2 (+https://github.com/deepseek-ai/deepseek-harness) dsh-profile/web`. `attributionHeaders()` returns `{'user-agent': userAgent()}`.
 
 API key check (`api-key.ts`): `normalizeApiKey(raw)` trims, then rejects `''` (`empty`) and anything not matching `^[\x21-\x7E]+$` (`illegalCharacters`). `assertUsableApiKey(raw, pkg, ref)` throws `INVALID_CREDENTIAL` with a message naming `ref` and never the key.
 
@@ -798,7 +806,7 @@ Hard parts and risks:
 - Regular expressions use JavaScript semantics (`\b`, `\s`, case-insensitive) and Unicode property classes (`\p{Cc}`, `\p{Zl}`, `\p{Zp}`, `\p{Bidi_Control}`, `\p{White_Space}`, `\p{Default_Ignorable_Code_Point}` in badge validation); the last three need explicit code-point sets in Racket. Badge length counts grapheme clusters. Listing gates need a semver comparison.
 - Cancellation and timing: the idle watchdog must be armed only while a read is outstanding and must not wait for the transport to notice the abort; retry waits must be cancellable from two sources and drained on disposal; the Files single-flight has waiter-local cancellation.
 - Image request versions come from the attachment service (resize and re-encode), which is outside this area; the adapter only chooses targets and budgets.
-- Recorded fixtures predate the Messages switch for some scenarios (usage with `reasoningTokens`, OpenAI-style call ids); replay must treat usage and ids as opaque data.
+- Recorded fixtures predate the Messages switch for some scenarios (usage with `reasoningTokens`, OpenAI-style call ids); replay must treat usage and ids as opaque data. Older fixture generations also carry earlier message-source spellings (for example a system message with `{"kind":"plugin","plugin":"@deepseek-ai/dsh-system-prompt"}`); the session format migrations, not this area, rewrite them before replay reads events.
 - `docs/subsystems/llm-streaming.md` mentions `llmRetryPolicyOf(stream)`; that function does not exist at the pinned commit (the policy travels on `PreparedLlmCall.retryPolicy`). Follow the source.
 
 What can only be wrapped at first: `llm-pi-ai`. It delegates wire protocols, model catalogs for about forty providers, OAuth logins, SigV4 and cloud credential discovery, and WebSocket transports to a Node library. A practical path is a Node sidecar that exposes `listModels`, `resolveModel`, `stream`, login, and discovery over a pipe, with the Racket side owning profile resolution, the registry, image budgets, and the stream vocabulary. Native Racket implementations of the four hand-declarable protocols (`openai-completions`, `openai-responses`, `anthropic-messages`, `google-generative-ai`) can replace the sidecar route by route; the Anthropic one shares most code with the DeepSeek adapter. The pi-ai config schema must still parse unchanged for configuration compatibility even where a route is not yet servable (report it through the directory entry's `error`, as deferred validation does).

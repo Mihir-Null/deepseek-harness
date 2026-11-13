@@ -21,9 +21,9 @@ This file is the stage plan and status for rebuilding DeepSeek Harness (dsh) as 
 
 | # | Stage | Output | Status |
 |---|---|---|---|
-| 0 | Reconnaissance | `docs/racket/recon/*.md`, package inventory | in progress |
-| 1 | Cordis analysis and ADRs | `docs/racket/cordis-analysis.md`, `docs/adr/` | pending |
-| 2 | Racket Cordis kernel | `racket/cordis/` with its own test suite | pending |
+| 0 | Reconnaissance | `docs/racket/recon/*.md`, package inventory | 16 of 20 notes done |
+| 1 | Cordis analysis and ADRs | `docs/racket/cordis-analysis.md`, `docs/adr/` | done (kept current) |
+| 2 | Racket Cordis kernel | `racket/cordis/` with its own test suite | in progress |
 | 3 | Harness, layer by layer | `racket/dsh-*/` | pending |
 | 4 | Interfaces | CLI, browser UI, Python SDK | pending |
 | 5 | Plugin porter | `SKILL.md`, porter tools, porter report | pending |

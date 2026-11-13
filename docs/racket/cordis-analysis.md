@@ -18,7 +18,18 @@ The paper separates dynamic composition into two independent problems.
 
 **Spatial composability** is the ability of a component to say what it needs from other components and to be started, stopped and restarted as those needs become satisfied or unsatisfied. The paper's answer is the *reactive coeffect*: a component carries a specification of the context it requires (its `inject` list), and every change to the context is classified against that specification to decide whether the component activates, deactivates, or is unaffected.
 
-The **context paradigm** joins the two. One first-class object, the context, is the only way to perform an effect and the only way to read a coeffect. Because every operation goes through a context, every operation is attributable to the component that owns that context. The paper states the consequence as a set of theorems over a small calculus of components: lifecycle transitions preserve well-formedness, unloading a component restores the context up to an observational equivalence, a provider's bindings stay readable to its dependents for their whole teardown (the coeffect ordering result), every reachable state can make progress, and interleavings of independent components converge.
+The **context paradigm** joins the two. One first-class object, the context, is the only way to perform an effect and the only way to read a coeffect. Because every operation goes through a context, every operation is attributable to the component that owns that context. The paper states the consequence as theorems over a small calculus of components (its section 4.3):
+
+| Result | What it guarantees | What it assumes |
+|---|---|---|
+| Preservation (Theorem 64) | every lifecycle step keeps the system well formed: parents exist, one provider per key per realm, every loaded fiber has a committed view that names live providers | nothing beyond the rules |
+| Temporal composability (Theorem 68, Corollary 69) | running a fiber's accumulated inverse withdraws that fiber's contribution and nothing else, whatever other fibers did meanwhile; afterwards it holds nothing | every effect goes through the context; every inverse really inverts; operations on one key commute. These are author obligations and are not checked |
+| Spatial composability, ordering (Theorem 70) | a fiber activates only when every declared key is provided; a provider outlives every consumer that resolved to it; a consumer can still read the provider during its own teardown | nothing beyond the rules |
+| Spatial composability, coherence (Theorem 71) | no activation step runs against a resolution other than the committed one, except the single step that lands while the target changes, whose effect is then withdrawn | |
+| Progress (Theorem 73) | no deadlock; every run reaches a quiescent state | the dependency relation is acyclic; effect iterators are finite |
+| Confluence (Theorem 80) | the quiescent state depends only on which components and configurations were supplied, not on order or history | acyclic dependencies; failed fibers are excluded |
+
+Equality in these statements is observational: a counter that was advanced is not rewound and a message that was sent stays sent. The kernel's tests therefore compare observations (which services exist in which realm, which listeners are registered, which fibers are live), never raw memory.
 
 A **component** is a pair of a coeffect specification and an effect function. A **fiber** is one instantiation of a component on a context: it has an identity, a parent, the committed view of its dependencies, the accumulated inverse of everything it has done, and a lifecycle state.
 
@@ -33,7 +44,7 @@ This section states the behaviour the Racket kernel has to reproduce. It is writ
 A `Context` is an object in a prototype chain. The root context owns the four kernel services (`reflect`, `registry`, `events`, `logger`) and the root fiber. `ctx.extend(meta)` makes a child whose prototype is the parent; a plugin fiber's context is `parent.extend({ fiber })`. Two tables are inherited the same way:
 
 - `ctx[isolate]` maps a service name to a realm symbol. `ctx.isolate(name, label?)` returns a child context in which `name` resolves to a different realm. Two contexts that map a name to different realms see independent services.
-- `ctx[intercept]` maps a service name to configuration that the provider consults when the service is used from this context. `ctx.intercept(name, config)` layers a new entry; a service merges the layers from outermost to innermost.
+- `ctx[intercept]` maps a service name to configuration that the provider consults when the service is used from this context. `ctx.intercept(name, config)` layers a new entry; a service merges the layers from outermost to innermost, so inner layers win. A plugin's own `inject: { name: config }` value is written as the innermost layer of its fiber's context. The paper describes context-carried metadata as taking priority; the code gives the component-declared value the last word. The port follows the code.
 
 Neither derivation needs an inverse: dropping the child context undoes it.
 
@@ -122,15 +133,15 @@ Each subsection names the Cordis concept, the Racket mechanism chosen, the alter
 
 **Chosen:** a context is an immutable struct `(context root parent fiber realms intercepts meta)`. `realms` and `intercepts` are persistent hashes, so `context-isolate` and `context-intercept` are functional updates that share structure with the parent, which is exactly what prototype inheritance gave. The mutable kernel state (service store, listener table, runtime registry, property table, scheduler) hangs off the root, reached through `context-root`.
 
-A parameter, `current-context`, carries the context implicitly. The kernel sets it whenever it runs plugin code: the plugin body, listeners, disposers and tasks. Threads inherit the parameterization of their creator, so a task spawned by a plugin starts in that plugin's context.
+The kernel also keeps a parameter, `current-context`, set whenever it runs plugin code. It is used for diagnostics and by the JavaScript compatibility runtime. It never decides ownership.
 
 **Alternatives:**
 
-- *Parameters only* (no explicit argument). This is the paper's section 6.7 ideal of an implicit context. It fails in one specific way in Racket: a closure does not capture the parameterization it was created in, so a callback stored by one component and called later by another runs with the caller's context. That is the use site, which is right for service methods and wrong for a listener that wants to register something in its own plugin.
-- *Explicit argument only*. Unambiguous and what Scheme programmers expect, but every helper has to thread the context.
+- *Parameters only* (no explicit argument). This is the paper's section 6.7 ideal of an implicit context. It fails in Racket in two specific ways. A closure does not capture the parameterization it was created in, so a callback stored by one component and called later by another runs with the caller's context. And harness code deliberately reads a service through a context that is not its own, for example a per-agent scope, expecting the registration to belong to that scope; an ambient default would silently pick the wrong fiber.
+- *Explicit argument for kernel operations, parameter default for service procedures.* This was the first draft of the design. It has the second problem above.
 - *Units* (`racket/unit`) as scopes. A unit's imports are fixed when it is invoked; there is no notion of a derived scope that shadows one binding.
 
-**Reason:** the two notions Cordis reconstructs with proxies are the two binding disciplines Scheme already distinguishes. The *definition site* is lexical scope: a plugin body closes over its own context and its injected services. The *use site* is dynamic scope: `current-context` during a call is the caller's context. So the rule in the Racket kernel is: kernel operations take the context as their first argument; a service procedure that acts on behalf of its caller takes `#:ctx [ctx (current-context)]`; a plugin's own registrations use the lexically bound `ctx`. No proxy is needed, and the reader can see which context is meant. See [ADR 0003](../adr/0003-explicit-context-with-parameter-default.md).
+**Reason:** the two notions Cordis reconstructs with proxies are the two binding disciplines Scheme already distinguishes. The *definition site* is lexical scope: a provider's procedures close over the provider's own context. The *use site* is whatever context the caller passes. So the rule in the Racket kernel is: every kernel operation and every service procedure takes the context as its first argument, and ownership follows that argument. Inside a plugin body an injected service is bound to a *service handle*, the pair of the plugin's context and the service key, and a handle can be passed wherever a context is expected: `(tools-register! tools my-tool)`. A handle is a capability in the sense of the paper's section 6.3. No proxy is needed, and the reader can see which context is meant. See [ADR 0003](../adr/0003-explicit-context-and-service-handles.md).
 
 ### 4.2 Revertible effects
 
@@ -169,7 +180,7 @@ So the inverse list restores the *context*, and the custodian reclaims the *reso
 On top of the reflective API sit two macros that carry the dependency declaration into the compiler:
 
 - `define-service` declares a service key together with a contract for its value. It defines a typed accessor and records the key at compile time.
-- `define-plugin` takes `#:inject (tools llm [approval #:optional])` and binds each injected service as a lexical variable in the plugin body. Because a fiber reloads whenever one of its providers is replaced, the committed view is constant during one activation, so binding the value once at entry is sound; this is the coeffect-ordering property used as a compiler optimisation. A body that mentions a service it did not declare has an unbound identifier, which is a compile-time error. This is the mediation by compile-time metaprogramming that section 6.4 of the paper anticipates, and the compile-time dependency check that section 5.1.4 says is possible in principle.
+- `define-plugin` takes `#:inject (tools llm [approval #:optional])` and binds each injected service as a lexical variable in the plugin body. The variable holds a service handle on the plugin's context; the handle resolves through the checked read at each use, so it enforces the declaration and is never stale. A body that mentions a service it did not declare has an unbound identifier, which is a compile-time error. This is the mediation by compile-time metaprogramming that section 6.4 of the paper anticipates, and the compile-time dependency check that section 5.1.4 says is possible in principle.
 
 Contracts are checked when a value is provided, and blame falls on the provider's module if the value does not meet the service contract, or on the consumer if it misuses a higher-order service. Blame assignment lines up with the provider and consumer roles of a dsh capability seam, which is a better fit than a type error at an arbitrary call site.
 
@@ -247,8 +258,8 @@ Schemastery is a combinator library whose values are both validators and descrip
 | Cordis | Racket | Notes |
 |---|---|---|
 | `Context`, prototype chain | immutable `context` struct, persistent hashes | functional derivation replaces inheritance |
-| implicit `this.ctx` rebinding | `current-context` parameter | use site is dynamic scope |
-| definition-site resolution | lexical scope of the plugin body | no proxy |
+| implicit `this.ctx` rebinding | context or service handle as first argument | the use site is passed explicitly |
+| definition-site resolution | lexical scope of the provider | no proxy |
 | `ctx.effect` | `ctx-effect`, `effect` macro | inverses are closures |
 | effect iterator (generator) | `racket/generator` | step-boundary interruption |
 | disposal on unload | LIFO inverses, then custodian shutdown | custodian is the backstop |
@@ -287,7 +298,7 @@ Schemastery is a combinator library whose values are both validators and descrip
 
 1. *Custodian shutdown is not an inverse.* It reclaims; it does not restore. It has no order, so the coeffect-ordering guarantee cannot be obtained from custodians alone. It also does not unwind killed threads.
 2. *`dynamic-wind` and escape continuations assume one thread of control.* Cordis effects are installed in one activation and reverted in a later one by a different task.
-3. *Parameters are not component-scoped.* A stored closure runs under its caller's parameterization. A design that relied only on `current-context` would attribute effects to the wrong fiber. The kernel therefore binds the context lexically in plugin bodies and re-establishes the parameter when it calls stored callbacks.
+3. *Parameters are not component-scoped.* A stored closure runs under its caller's parameterization. A design that relied on `current-context` for ownership would attribute effects to the wrong fiber. The kernel therefore passes the context explicitly and uses the parameter only for diagnostics.
 4. *Racket threads are preemptive.* The JavaScript kernel's correctness depends on run-to-completion. Racket code that mutates shared tables from two threads is wrong. The cooperative task layer restores the assumption; without it most of the kernel would need locks.
 5. *Units are static.* They give the best static account of "what does this component need" in the Racket world, and they have no reactive part.
 6. *No transparent interception.* Racket has chaperones and impersonators, which are how contracts are implemented and which could imitate the tracing proxies. Using them would hide which context an operation uses. The port prefers an explicit argument.
@@ -299,13 +310,13 @@ Schemastery is a combinator library whose values are both validators and descrip
 
 **Kept exactly:** the effect contract, LIFO disposal, nested effects, the service store with realms, strict and non-strict reads, the checked read and its error cases, in-place `set`, interception layering, the fiber states and the inertial state machine, target computation from provider identities, dependents-first unload ordering, failure recording and recovery through update, the five dispatch modes, `prepend`, `global`, dispatch filters, and the `internal/*` events.
 
-**Changed, with the same observable behaviour for configuration and ported plugins:** property access becomes `ctx-ref` or lexical bindings; promises become awaitables; `this.ctx` rebinding becomes an explicit or parameter-supplied context; class-based `Service` becomes a plugin form that provides a value.
+**Changed, with the same observable behaviour for configuration and ported plugins:** property access becomes `ctx-ref` or lexical handles; promises become awaitables; `this.ctx` rebinding becomes an explicit context argument; class-based `Service` becomes a plugin form that provides a value.
 
 **Added (Racket extensions, each recorded in an ADR and none required by dsh configuration):** a custodian per fiber; static `inject` checking; `define-event` mode enforcement; the `plugin-info` submodule; sandboxed plugin loading with resource limits; break-based cancellation of tasks; deterministic scheduling.
 
 ## 7. Laws the kernel is tested against
 
-These come from the paper's theorems and from the vendored specs. Each is a test or a property test in `racket/cordis/tests/`.
+These come from the paper's theorems and from the vendored specs. Each is a test or a property test in `racket/cordis/tests/`. The paper digest derives a longer list of 44 executable properties with their theorem numbers ([recon/19-paper-digest.md](recon/19-paper-digest.md), "Laws an implementation should test"); the fifteen below are the ones the kernel must not ship without, and the suite also covers the digest's lifecycle, independence, progress and confluence items (its numbers 18 to 39) as randomized-schedule property tests.
 
 1. *Reversal.* For any sequence of effects installed by a fiber, disposing the fiber leaves the listener table, service store and property table equal to their state before the fiber was created.
 2. *LIFO.* Inverses run in reverse order of installation; a nested effect's inverses run as part of its parent's inverse.
@@ -326,5 +337,5 @@ These come from the paper's theorems and from the vendored specs. Each is a test
 ## 8. Open questions
 
 - How much of `ctx.accessor` and `ctx.mixin` the port needs beyond supporting translated plugins that write `ctx.<name>`.
-- Whether effect iterators should be interruptible at every `yield` during reload, as in the paper, or only between top-level effects, as in the vendored source's synchronous iterator path.
+- Resolved: effect iterators are interruptible at every `yield`. The vendored source checks its guard before each step of an asynchronous iterator and drains a synchronous one without checking. In Racket a generator step may `await`, so every step is potentially asynchronous and the guard is checked before each resume, as in the paper's Algorithm 1.
 - Whether sandboxed plugin namespaces should share the loader's module registry or attach only the kernel.
