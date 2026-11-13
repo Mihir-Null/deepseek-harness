@@ -387,7 +387,7 @@
 ;; Numbers and booleans
 
 (define (number->fixed x digits)
-  (define value (->fl x))
+  (define value (js-fl x))
   (cond
     [(or (not (fl= value value)) (fl>= (flabs value) 1e21)) (js->string x)]
     [(fl< value 0.0) (string-append "-" (number->fixed (fl* -1.0 value) digits))]
@@ -550,11 +550,11 @@
 
 (define (number-value? v) (real? v))
 (define (finite-number? v)
-  (and (real? v) (let ([x (->fl v)]) (and (fl= x x) (not (fl= (flabs x) +inf.0))))))
+  (and (real? v) (let ([x (js-fl v)]) (and (fl= x x) (not (fl= (flabs x) +inf.0))))))
 (define (integral-number? v)
-  (and (finite-number? v) (let ([x (->fl v)]) (fl= x (flfloor x)))))
+  (and (finite-number? v) (let ([x (js-fl v)]) (fl= x (flfloor x)))))
 (define (nan-value? v)
-  (and (real? v) (let ([x (->fl v)]) (not (fl= x x)))))
+  (and (real? v) (let ([x (js-fl v)]) (not (fl= x x)))))
 
 (define (to-int32 v)
   (define n (->integer-or-infinity v))
@@ -619,7 +619,7 @@
          "isInteger" (lambda (v) (integral-number? v))
          "isNaN" (lambda (v) (nan-value? v))
          "isSafeInteger" (lambda (v)
-                           (and (integral-number? v) (<= (abs (->fl v)) 9007199254740991.0)))
+                           (and (integral-number? v) (<= (abs (js-fl v)) 9007199254740991.0)))
          "parseFloat" js-parse-float
          "parseInt" js-parse-int
          "MAX_SAFE_INTEGER" 9007199254740991
@@ -674,7 +674,7 @@
     [(or (void? v) (procedure? v)) absent]
     [(or (string? v) (boolean? v) (eq? v 'null)) v]
     [(real? v)
-     (define x (->fl v))
+     (define x (js-fl v))
      (if (or (not (fl= x x)) (fl= (flabs x) +inf.0)) 'null (normalize-number v))]
     [(list? v)
      (for/list ([item (in-list v)] [i (in-naturals)])
@@ -731,7 +731,7 @@
 ;; ---- Math ----
 
 (define (math-unary f)
-  (lambda arguments (normalize-number (f (->fl (js->number (arg arguments 0)))))))
+  (lambda arguments (normalize-number (f (js-fl (js->number (arg arguments 0)))))))
 
 (define (math-round x)
   (cond [(or (not (fl= x x)) (fl= (flabs x) +inf.0) (fl= x (flfloor x))) x]
@@ -748,7 +748,7 @@
 ;; with the wanted sign wins.
 (define (math-extreme start better? wanted-zero)
   (lambda arguments
-    (define operands (for/list ([a (in-list arguments)]) (->fl (js->number a))))
+    (define operands (for/list ([a (in-list arguments)]) (js-fl (js->number a))))
     (normalize-number
      (for/fold ([best start]) ([x (in-list operands)])
        (cond [(or (not (fl= best best)) (not (fl= x x))) +nan.0]

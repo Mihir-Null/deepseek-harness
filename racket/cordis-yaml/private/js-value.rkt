@@ -22,7 +22,7 @@
          js-truthy?
          js-typeof
          normalize-number
-         ->fl
+         js-fl
          decimal->number
          js-negate
          js->number
@@ -92,8 +92,8 @@
      (if (<= (abs x) max-safe-magnitude) x (normalize-number (real->double-flonum x)))]
     [else (normalize-number (real->double-flonum x))]))
 
-;; ->fl : real? -> flonum?   The double a JavaScript number stands for.
-(define (->fl x)
+;; js-fl : real? -> flonum?   The double a JavaScript number stands for.
+(define (js-fl x)
   (if (flonum? x) x (real->double-flonum x)))
 
 ;; decimal->number : string? string? exact-integer? -> real?
@@ -113,7 +113,7 @@
 
 ;; js-negate : real? -> real?   Unary minus; the negation of 0 is -0.
 (define (js-negate x)
-  (normalize-number (fl* -1.0 (->fl x))))
+  (normalize-number (fl* -1.0 (js-fl x))))
 
 (define (js-whitespace? c)
   (or (memv c '(#\tab #\newline #\vtab #\page #\return #\space #\uA0 #\uFEFF #\u2028 #\u2029))
@@ -172,7 +172,7 @@
 ;; ->integer-or-infinity : any/c -> (or/c exact-integer? +inf.0 -inf.0)
 ;; ECMAScript's ToIntegerOrInfinity.
 (define (->integer-or-infinity v)
-  (define x (->fl (js->number v)))
+  (define x (js-fl (js->number v)))
   (cond [(not (fl= x x)) 0]
         [(or (fl= x +inf.0) (fl= x -inf.0)) x]
         [else (fl->exact-integer (fltruncate x))]))
@@ -296,7 +296,7 @@
 
 ;; js-strict-equal? : any/c any/c -> boolean?   The === operator.
 (define (js-strict-equal? a b)
-  (cond [(and (real? a) (real? b)) (fl= (->fl a) (->fl b))]
+  (cond [(and (real? a) (real? b)) (fl= (js-fl a) (js-fl b))]
         [(and (string? a) (string? b)) (string=? a b)]
         [(and (boolean? a) (boolean? b)) (eq? a b)]
         [(and (void? a) (void? b)) #t]
@@ -307,7 +307,7 @@
 ;; js-same-value-zero? : any/c any/c -> boolean?   As ===, except that NaN equals NaN.
 (define (js-same-value-zero? a b)
   (if (and (real? a) (real? b))
-      (let ([x (->fl a)] [y (->fl b)])
+      (let ([x (js-fl a)] [y (js-fl b)])
         (or (fl= x y) (and (not (fl= x x)) (not (fl= y y)))))
       (js-strict-equal? a b)))
 
@@ -339,8 +339,8 @@
        [(<=) (not (js-string<? pb pa))]
        [else (not (js-string<? pa pb))])]
     [else
-     (define x (->fl (js->number pa)))
-     (define y (->fl (js->number pb)))
+     (define x (js-fl (js->number pa)))
+     (define y (js-fl (js->number pb)))
      (case op
        [(<) (fl< x y)]
        [(>) (fl> x y)]
@@ -356,7 +356,7 @@
   (define pb (js->primitive b 'default))
   (if (or (string? pa) (string? pb))
       (string-append (js->string pa) (js->string pb))
-      (normalize-number (fl+ (->fl (js->number pa)) (->fl (js->number pb))))))
+      (normalize-number (fl+ (js-fl (js->number pa)) (js-fl (js->number pb))))))
 
 ;; The remainder with the sign of the dividend, as the % operator computes it.
 (define (fl-remainder x y)
@@ -374,8 +374,8 @@
 
 ;; js-arithmetic : (or/c '- '* '/ '%) any/c any/c -> real?
 (define (js-arithmetic op a b)
-  (define x (->fl (js->number a)))
-  (define y (->fl (js->number b)))
+  (define x (js-fl (js->number a)))
+  (define y (js-fl (js->number b)))
   (normalize-number
    (case op
      [(-) (fl- x y)]
