@@ -275,23 +275,49 @@
   ;; inverses of the body are top-level entries: started newest first
   (check-equal? (notes) '(returned-2 returned-1 awaited yielded)))
 
-(test-case "rule 3: a body may return a disposer or a fiber it created"
+(test-case "rule 3: a body may end with a registration call"
   (with-root-context (ctx)
-    (define child #f)
     (define f (ctx-plugin ctx (lambda (c config)
                                 (ctx-on c 'event void)
                                 (ctx-on c 'last-expression void))))
-    (define g (ctx-plugin ctx (lambda (c config)
-                                (set! child (ctx-plugin c (lambda (cc config) (void))))
-                                child)))
     (await/t f)
-    (await/t g)
     (check-eq? (fiber-state f) 'active)
-    (check-eq? (fiber-state g) 'active)
-    (check-eq? (fiber-state child) 'active)
     (check-equal? (labels f) '("ctx.on(\"event\")" "ctx.on(\"last-expression\")"))
     (fiber-dispose! f)
     (check-equal? (ctx-listeners ctx 'last-expression) '())))
+
+(test-case "rule 3: a body that ends with ctx-plugin does not depend on that child"
+  (define-values (note notes) (make-recorder))
+  (with-root-context (ctx)
+    (define g (gate))
+    (define slow-child #f)
+    (define failing-child #f)
+    (define waits
+      (ctx-plugin ctx (lambda (c config)
+                        (set! slow-child
+                              (ctx-plugin c (lambda (cc config) (gate-wait g) (note 'slow-loaded))))
+                        slow-child)))
+    (define survives
+      (ctx-plugin ctx (lambda (c config)
+                        (set! failing-child
+                              (ctx-plugin c (lambda (cc config) (raise-user-error "child failed"))))
+                        (list failing-child))))
+    ;; the parents are active while one child still loads and the other has failed
+    (await/t waits)
+    (await/t survives)
+    (check-eq? (fiber-state waits) 'active)
+    (check-eq? (fiber-state slow-child) 'loading)
+    (check-eq? (fiber-state survives) 'active)
+    (check-exn #rx"child failed" (lambda () (await/t failing-child)))
+    (check-eq? (fiber-state failing-child) 'failed)
+    (check-eq? (fiber-state survives) 'active)
+    (check-equal? (labels waits) '("ctx.plugin()"))
+    (gate-open! g)
+    (await/t slow-child)
+    (check-equal? (notes) '(slow-loaded))
+    ;; the child still belongs to its parent
+    (fiber-dispose! waits)
+    (check-eq? (fiber-state slow-child) 'disposed)))
 
 (test-case "rule 3: an invalid body result fails the fiber"
   (with-root-context (ctx)

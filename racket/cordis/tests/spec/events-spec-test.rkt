@@ -1,8 +1,9 @@
 #lang racket/base
 ;; Black-box specification tests for events: contract section 7
 ;; (docs/racket/contracts/cordis-kernel.md), read against
-;; vendor/cordis/src/events.ts, plus recon case 8 and the supplementary cases
-;; S7 to S11 of docs/racket/recon/01-cordis-core.md.
+;; vendor/cordis/src/events.ts, plus recon case 8, the supplementary cases
+;; S7 to S11 of docs/racket/recon/01-cordis-core.md, and addenda 2 and 4 of
+;; contract section 12 (ctx-dispatch-callbacks, call-contained).
 ;; The comment in front of each case names its source.
 (require cordis
          cordis/testing
@@ -378,3 +379,85 @@
     (gate-open! gate)
     (check-eq? (await dispatching) 'done)
     (check-equal? (notes log) '(first-start first-end second))))
+
+;; source: contract 12 addendum 2, ctx-dispatch-callbacks; events.ts dispatch
+;; ("Resolve bound callbacks using the event's context filter")
+(test-case "events/dispatch-callbacks: resolves the listeners of a dispatch without calling them"
+  (define dispatch-callbacks (optional-binding 'cordis 'ctx-dispatch-callbacks))
+  (check-true (procedure? dispatch-callbacks) "cordis must export ctx-dispatch-callbacks")
+  (when (procedure? dispatch-callbacks)
+    (with-root (ctx)
+      (define log (make-recorder))
+      (define announced (make-recorder))
+      (define red (context-extend ctx (hasheq 'color 'red)))
+      (define blue (context-extend ctx (hasheq 'color 'blue)))
+      (ctx-on red 'spec/resolve
+              (lambda (x) (note! log (list 'red x (eq? (current-context) red))) 'red-result))
+      (ctx-on blue 'spec/resolve
+              (lambda (x) (note! log (list 'blue x (eq? (current-context) blue)))))
+      (ctx-on blue 'spec/resolve (lambda (x) (note! log (list 'blue-global x))) #:global? #t)
+      (ctx-on ctx 'spec/resolve (lambda (x) (note! log (list 'front x))) #:prepend? #t)
+      (ctx-on ctx 'internal/dispatch
+              (lambda (mode name args) (note! announced (list (format "~a" mode) name args))))
+      (define all (dispatch-callbacks ctx 'emit 'spec/resolve '(1)))
+      (check-equal? (length all) 4)
+      (check-true (andmap procedure? all))
+      ;; Resolution calls no listener and is announced like a dispatch.
+      (check-equal? (notes log) '())
+      (check-equal? (notes announced) '(("emit" spec/resolve (1))))
+      (for ([callback (in-list all)]) (callback 1))
+      (check-equal? (notes log) '((front 1) (red 1 #t) (blue 1 #t) (blue-global 1)))
+      (check-eq? ((second all) 2) 'red-result)
+      ;; The filter applies to registering contexts; global listeners bypass it.
+      (define (red? c) (eq? (context-meta c 'color) 'red))
+      (define filtered (dispatch-callbacks ctx 'bail 'spec/resolve '(3) #:filter red?))
+      (check-equal? (length filtered) 2)
+      (for ([callback (in-list filtered)]) (callback 3))
+      (check-equal? (drop (notes log) 5) '((red 3 #t) (blue-global 3)))
+      (check-equal? (dispatch-callbacks ctx 'emit 'spec/nobody '()) '())
+      ;; An internal event is resolved without an 'internal/dispatch emit.
+      (define count (length (notes announced)))
+      (dispatch-callbacks ctx 'emit 'internal/custom '())
+      (check-equal? (length (notes announced)) count))))
+
+;; source: contract 12 addendum 4, call-contained
+(test-case "events/call-contained: an exn:fail is logged and contained; other raises propagate"
+  (define call-contained (optional-binding 'cordis 'call-contained))
+  (check-true (procedure? call-contained) "cordis must export call-contained")
+  (when (procedure? call-contained)
+    (with-root (ctx)
+      (check-eq? (call-contained ctx (lambda () 'value)) 'value)
+      ;; A receiver for every topic under the cordis logger: the contract says
+      ;; "on ctx's logger" and leaves the topic open.
+      (define receiver (make-log-receiver cordis-logger 'error))
+      (define result
+        (call-contained ctx
+                        (lambda () (raise-user-error "listener broke"))
+                        #:label "spec-listener"))
+      (define records
+        (let loop ([acc '()])
+          (define record (sync/timeout 0 receiver))
+          (if record (loop (cons record acc)) (reverse acc))))
+      (check-equal? result (void))
+      (check-equal? (length records) 1)
+      (when (pair? records)
+        (define record (first records))
+        (define data (vector-ref record 2))
+        (check-eq? (vector-ref record 0) 'error)
+        (check-true (or (and (exn? data) (regexp-match? #rx"listener broke" (exn-message data)))
+                        (regexp-match? #rx"listener broke" (vector-ref record 1)))
+                    "the log record carries the exception")
+        (check-true (or (regexp-match? #rx"spec-listener" (vector-ref record 1))
+                        (regexp-match? #rx"spec-listener" (format "~a" (vector-ref record 3))))
+                    "the log record carries the label"))
+      ;; Raises that are not exn:fail propagate.
+      (check-eq? (with-handlers ([symbol? values])
+                   (call-contained ctx (lambda () (raise 'not-an-exception)))
+                   'returned)
+                 'not-an-exception)
+      (define (raise-break)
+        (let/ec k (raise (exn:break "user break" (current-continuation-marks) k))))
+      (check-eq? (with-handlers ([exn:break? (lambda (e) 'break-propagated)])
+                   (call-contained ctx raise-break)
+                   'returned)
+                 'break-propagated))))

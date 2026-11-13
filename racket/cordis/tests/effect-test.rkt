@@ -83,18 +83,33 @@
     (check-equal? (labels f) '()))
   (check-equal? (notes) '(from-evt from-task)))
 
-(test-case "results: an evt that is its own result, and a fiber, collect nothing"
+(test-case "results: an evt that is its own result collects nothing"
   (with-root-context (ctx)
     (define f (mount ctx))
     (define c (fiber-context f))
     (define sema (make-semaphore 1))
     (define d (ctx-effect c (lambda () sema)))
     (check-eq? (await/t d) d)
+    (check-equal? (d) (void))))
+
+(test-case "results: a fiber collects nothing and is not waited for"
+  (with-root-context (ctx)
+    (define f (mount ctx))
+    (define c (fiber-context f))
+    (define g (gate))
     (define child #f)
-    (define d2 (ctx-effect c (lambda ()
-                               (set! child (ctx-plugin c (lambda (c config) (void))))
-                               child)))
-    (check-eq? (await/t d2) d2)
+    (define d (ctx-effect c (lambda ()
+                              (set! child (ctx-plugin c (lambda (c config) (gate-wait g))))
+                              child)))
+    ;; setup is settled although the child still loads
+    (check-not-false (sync/timeout 0 d))
+    (check-eq? (fiber-state child) 'loading)
+    (check-equal? (disposer-children d) '())
+    (check-equal? (d) (void))
+    ;; the effect did not adopt the child: its own ctx.plugin() effect still owns it
+    (check-equal? (labels f) '("ctx.plugin()"))
+    (gate-open! g)
+    (await/t child)
     (check-eq? (fiber-state child) 'active)
     (fiber-dispose! f)
     (check-eq? (fiber-state child) 'disposed)))

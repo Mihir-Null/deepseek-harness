@@ -160,44 +160,159 @@
   (check-equal? (notes) '(holder-done broken))
   (custodian-shutdown-all cust))
 
-(test-case "rule 4: a break while the task runs is raised where breaks are enabled"
+(test-case "rule 4: a break while the task runs stays pending until its next release point"
+  (define-values (note notes) (make-recorder))
   (define cust (make-custodian))
   (define s (make-scheduler #:custodian cust))
   (define started (make-semaphore 0))
-  (define spinner
-    (spawn-task (lambda () (semaphore-post started) (let loop () (loop))) #:scheduler s))
+  (define go (make-semaphore 0))
+  (define t
+    (spawn-task (lambda ()
+                  (with-handlers ([exn:break? (lambda (e) (note 'broken) (in-task?))])
+                    (semaphore-post started)
+                    ;; a plain `sync` keeps the baton: the task counts as running
+                    (sync go)
+                    (note 'ran-on)
+                    (for ([i (in-range 100000)]) (void))
+                    (note 'still-running)
+                    (yield-task)
+                    (note 'unreached)))
+                #:scheduler s))
   (sync/t started)
-  (task-cancel! spinner)
-  (sync/t spinner)
-  (check-exn exn:break? (lambda () (task-result spinner)))
+  (task-cancel! t)
+  (semaphore-post go)
+  (sync/t t)
+  (check-equal? (task-result t) #t)
+  (check-equal? (notes) '(ran-on still-running broken))
   (custodian-shutdown-all cust))
 
-(test-case "rule 4: with breaks disabled, await is not interrupted"
+(test-case "rule 4: every release point raises a pending break"
+  (define (broken-at release-point)
+    (call-with-scheduler
+     (lambda ()
+       (define done (spawn-task void))
+       (await done)
+       (define t
+         (spawn-task (lambda ()
+                       (break-thread (current-thread))
+                       (with-handlers ([exn:break? (lambda (e) 'broken)])
+                         (release-point done)
+                         'not-broken))))
+       (await/t t))))
+  (check-equal? (broken-at (lambda (done) (await (make-semaphore 1)))) 'broken)
+  (check-equal? (broken-at (lambda (done) (await done))) 'broken)
+  (check-equal? (broken-at (lambda (done) (await-all (list done)))) 'broken)
+  (check-equal? (broken-at (lambda (done) (await/timeout patience done))) 'broken)
+  (check-equal? (broken-at (lambda (done) (yield-task))) 'broken)
+  (check-equal? (broken-at (lambda (done) (task-sleep 0))) 'broken)
+  (check-equal? (broken-at (lambda (done) (blocking void))) 'broken)
+  (check-equal? (broken-at (lambda (done) (task-result (spawn-task void)))) 'broken)
+  (check-equal? (broken-at (lambda (done) (task-check-break))) 'broken)
+  ;; reading the result of a finished task is not a release point
+  (check-equal? (broken-at (lambda (done) (task-result done))) 'not-broken))
+
+(test-case "rule 4: task-check-break returns when no break is pending"
+  (call-with-scheduler
+   (lambda ()
+     (check-equal? (task-check-break) (void))))
+  ;; outside a task, with breaks enabled, nothing can be pending
+  (check-equal? (task-check-break) (void)))
+
+(test-case "rule 4: a task that reaches no release point is stopped only by task-kill!"
+  (define cust (make-custodian))
+  (define s (make-scheduler #:custodian cust))
+  (define started (make-semaphore 0))
+  (define release (make-semaphore 0))
+  (define passed (make-semaphore 0))
+  (define spinner
+    (spawn-task (lambda ()
+                  (semaphore-post started)
+                  ;; holds the baton, breaks stay pending
+                  (sync release)
+                  (semaphore-post passed)
+                  (let loop () (loop)))
+                #:scheduler s))
+  (define next (spawn-task (lambda () 'next) #:scheduler s))
+  (sync/t started)
+  (task-cancel! spinner)
+  (semaphore-post release)
+  ;; the break did not end the plain wait, nor the code after it
+  (sync/t passed)
+  (check-false (task-done? spinner))
+  (check-false (task-done? next))
+  (task-kill! spinner)
+  (sync/t spinner)
+  (check-exn exn:fail:cordis:task-killed? (lambda () (task-result spinner)))
+  (check-equal? (begin (sync/t next) (task-result next)) 'next)
+  (custodian-shutdown-all cust))
+
+(test-case "rule 4: code that masks breaks waits without being interrupted"
+  (define (survives-cancel body)
+    (define cust (make-custodian))
+    (define s (make-scheduler #:custodian cust))
+    (define waiting (make-semaphore 0))
+    (define go (make-semaphore 0))
+    (define holding (make-semaphore 0))
+    (define release (make-semaphore 0))
+    (define completed? #f)
+    (define t
+      (spawn-task (lambda ()
+                    (body (lambda ()
+                            (semaphore-post waiting)
+                            (await go)
+                            (set! completed? #t))))
+                  #:scheduler s))
+    (sync/t waiting)
+    ;; while another task holds the baton, the break cannot be overtaken by the wake-up
+    (spawn-task (lambda () (semaphore-post holding) (sync release)) #:scheduler s)
+    (sync/t holding)
+    (task-cancel! t)
+    (semaphore-post go)
+    (semaphore-post release)
+    (sync/t t)
+    (custodian-shutdown-all cust)
+    completed?)
+  (check-true (survives-cancel (lambda (wait) (parameterize-break #f (wait)))))
+  (check-true (survives-cancel
+               (lambda (wait)
+                 (with-handlers ([symbol? (lambda (e) (wait))]) (raise 'to-the-handler)))))
+  (check-true (survives-cancel (lambda (wait) (dynamic-wind void void wait))))
+  (check-true (survives-cancel (lambda (wait) (dynamic-wind wait void void))))
+  ;; without a mask the same wait is interrupted
+  (check-false (survives-cancel (lambda (wait) (wait))))
+  (check-false (survives-cancel (lambda (wait) (dynamic-wind void wait void))))
+  (check-false (survives-cancel
+                (lambda (wait)
+                  (parameterize ([current-output-port (current-output-port)]) (wait)))))
+  ;; a mask ends with its extent: the break is raised at the next release point after it
+  (check-false (survives-cancel
+                (lambda (wait)
+                  (parameterize-break #f
+                    (void))
+                  (wait)))))
+
+(test-case "rule 4: a break masked during one wait is raised at the next unmasked one"
+  (define-values (note notes) (make-recorder))
   (define cust (make-custodian))
   (define s (make-scheduler #:custodian cust))
   (define waiting (make-semaphore 0))
   (define go (make-semaphore 0))
-  (define holding (make-semaphore 0))
-  (define release (make-semaphore 0))
-  (define completed? #f)
   (define t
     (spawn-task (lambda ()
-                  (parameterize-break #f
-                    (semaphore-post waiting)
-                    (await go)
-                    (set! completed? #t)))
+                  (with-handlers ([exn:break? (lambda (e) (note 'broken))])
+                    (parameterize-break #f
+                      (semaphore-post waiting)
+                      (await go)
+                      (note 'masked-wait-done))
+                    (note 'after-mask)
+                    (yield-task)
+                    (note 'unreached)))
                 #:scheduler s))
   (sync/t waiting)
-  ;; while another task holds the baton, the break cannot be overtaken by the wake-up
-  (spawn-task (lambda () (semaphore-post holding) (sync release)) #:scheduler s)
-  (sync/t holding)
   (task-cancel! t)
   (semaphore-post go)
-  (semaphore-post release)
   (sync/t t)
-  ;; the wait was not interrupted
-  (check-true completed?)
-  (check-true (task-done? t))
+  (check-equal? (notes) '(masked-wait-done after-mask broken))
   (custodian-shutdown-all cust))
 
 ;; ---------------------------------------------------------------------------------------
@@ -538,8 +653,16 @@
      (lambda ()
        (parameterize ([current-baton-warn-ms #f])
          (sync/t (wrap-evt (spawn-task (lambda () (sleep 0.05)) #:scheduler s) void)))
-       (parameterize ([current-baton-warn-ms 20])
-         (sync/t (wrap-evt (spawn-task (lambda () (task-sleep 0.1)) #:scheduler s) void))))
+       ;; The task waits longer than the threshold but holds the baton only for the instants
+       ;; before and after the wait. The threshold is far above any pause of the machine.
+       (parameterize ([current-baton-warn-ms 250])
+         (define waiting (make-semaphore 0))
+         (define go (make-semaphore 0))
+         (define t (spawn-task (lambda () (semaphore-post waiting) (await go)) #:scheduler s))
+         (sync/t waiting)
+         (sync/timeout 0.3 never-evt)
+         (semaphore-post go)
+         (sync/t t)))
      #:level 'warning))
   (check-equal? events '())
   (check-equal? (current-baton-warn-ms) 2000)

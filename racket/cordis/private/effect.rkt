@@ -72,7 +72,7 @@
 (define (raise-invalid-effect v)
   (raise (exn:fail:contract
           (format (string-append "invalid effect: expected (void), #f, a procedure of no "
-                                 "arguments, a list, a generator, a task or an evt\n"
+                                 "arguments, a list, a generator, a fiber, a task or an evt\n"
                                  "  given: ~e")
                   v)
           (current-continuation-marks))))
@@ -83,6 +83,9 @@
 ;; `resume` resumes a generator and returns its values as a list.
 ;; In mode 'sync an evt stops interpretation: the result is (cons 'async remaining-items).
 ;; In mode 'async an evt is awaited in the calling task. Otherwise the result is 'done.
+;; A fiber adds nothing and is not waited for: it is owned through its `ctx.plugin()`
+;; effect, and the fiber that mounts it does not depend on how its load ends. A body or
+;; thunk may therefore end with `ctx-plugin`, as a TypeScript body ends with the statement.
 (define (interpret-results items mode
                            #:collect collect
                            #:continue? continue?
@@ -111,19 +114,19 @@
           (collect item)
           (loop rest)]
          [(list? item) (loop (append item rest))]
+         [(fiber? item) (loop rest)]
          [(evt? item)
           (if (eq? mode 'sync)
               (cons 'async stack)
               (loop (append (await-effect-result item) rest)))]
          [else (raise-invalid-effect item)])])))
 
-;; A task yields its thunk's values and a fiber yields nothing once it has settled. Another
-;; evt yields its synchronization result, except the evt itself: many evts (threads,
-;; semaphores) are their own result, which would otherwise be awaited forever.
+;; A task yields its thunk's values. Another evt yields its synchronization result, except
+;; the evt itself: many evts (threads, semaphores) are their own result, which would
+;; otherwise be awaited forever.
 (define (await-effect-result x)
   (cond
     [(task? x) (call-with-values (lambda () (task-result x)) list)]
-    [(fiber? x) (fiber-await x) '()]
     [else (remq* (list x) (call-with-values (lambda () (await x)) list))]))
 
 ;; ---------------------------------------------------------------------------------------

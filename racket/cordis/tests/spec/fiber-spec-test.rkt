@@ -2,7 +2,8 @@
 ;; Black-box specification tests for plugins and fibers: contract section 6
 ;; (docs/racket/contracts/cordis-kernel.md), read against
 ;; vendor/cordis/src/fiber.ts, plus the supplementary cases S1 to S4, S17, S19,
-;; S20, S23, S24 and S28 of docs/racket/recon/01-cordis-core.md.
+;; S20, S23, S24 and S28 of docs/racket/recon/01-cordis-core.md, the root and
+;; thread rules of contract section 3, and addendum 3 of contract section 12.
 ;; The comment in front of each case names its source.
 (require cordis
          cordis/testing
@@ -682,24 +683,120 @@
     (check-eq? (fiber-state f) 'active)
     (check-equal? (notes applied) '(1))))
 
-;; source: contract 6, "Config schemas", prop:config-schema
-(test-case "fiber/config: a value with prop:config-schema validates through its procedure"
-  (define prop (optional-binding 'cordis 'prop:config-schema))
-  (check-true (struct-type-property? prop) "cordis must export prop:config-schema")
-  (when (struct-type-property? prop)
+;; source: contract 6, "Config schemas", "any value applicable to one argument
+;; (a procedure, or a struct with prop:procedure such as a cordis-schema schema)"
+(test-case "fiber/config: a struct with prop:procedure is a schema"
+  (with-root (ctx)
+    (struct at-least (minimum)
+      #:property prop:procedure
+      (lambda (self raw) (max raw (at-least-minimum self))))
+    (define schema (at-least 10))
+    (define seen (make-recorder))
+    (define p (named "clamped" (lambda (c config) (note! seen config) (void)) #:config schema))
+    (check-eq? (plugin-config-schema p) schema)
+    (define f (ctx-plugin ctx p 3))
+    (await f)
+    (check-equal? (notes seen) '(10))
+    (check-eqv? (fiber-config f) 3)
+    (check-eqv? (fiber-effective-config f) 10)))
+
+;; source: contract 6, "Config schemas", "Whatever it raises propagates
+;; unchanged and is what the fiber records as its error"
+(test-case "fiber/config: what a schema raises is recorded and propagated unchanged"
+  (with-root (ctx)
+    (define failure (make-exn:fail:user "schema says no" (current-continuation-marks)))
+    (define (schema raw) (if (eq? raw 'bad) (raise failure) raw))
+    (define f (ctx-plugin ctx
+                          (named "picky" (lambda (c config) (void)) #:config schema)
+                          'bad))
+    (settle f)
+    (check-eq? (fiber-state f) 'failed)
+    (check-eq? (fiber-error f) failure)
+    (check-eq? (with-handlers ([exn:fail? values]) (fiber-await f)) failure)
+    (fiber-update! f 'good)
+    (check-eq? (fiber-state f) 'active)
+    ;; A loaded fiber validates the candidate in the caller: the same object
+    ;; reaches the caller of fiber-update! and the fiber stays as it was.
+    (check-eq? (with-handlers ([exn:fail? values]) (fiber-update! f 'bad)) failure)
+    (check-eq? (fiber-state f) 'active)
+    (check-eq? (fiber-config f) 'good)
+    (check-false (fiber-error f))))
+
+;; source: contract 6, "Config schemas", exn:fail:cordis:validation message and
+;; "(raise-validation-error issues)"; fiber.ts ValidationError; recon 01
+;; Formats ("  - <message> (at <path joined by .>)")
+(test-case "fiber/config: raise-validation-error builds the Cordis ValidationError text"
+  (define raise-validation-error (optional-binding 'cordis 'raise-validation-error))
+  (check-true (procedure? raise-validation-error) "cordis must export raise-validation-error")
+  (when (procedure? raise-validation-error)
+    (define issues (list (cons '(server port) "expected a number")
+                         (cons '(name) "required")))
+    (define e (with-handlers ([exn:fail? values]) (raise-validation-error issues) 'returned))
+    (check-pred exn:fail:cordis:validation? e)
+    (check-pred exn:fail:cordis? e)
+    (check-equal? (exn:fail:cordis:validation-issues e) issues)
+    (check-equal? (exn-message e)
+                  "invalid config:\n  - expected a number (at server.port)\n  - required (at name)")
+    ;; fiber.ts prints an issue that has no path without the "(at ...)" part;
+    ;; the contract does not say how a path-less issue is written, so only the
+    ;; start of its line is checked.
+    (define pathless
+      (with-handlers ([exn:fail? values]) (raise-validation-error (list (cons '() "bad value")))))
+    (check-pred exn:fail:cordis:validation? pathless)
+    (check-regexp-match #rx"^invalid config:\n  - bad value" (exn-message pathless))
+    ;; A schema that uses the helper fails its fiber with that exception.
     (with-root (ctx)
-      (struct at-least (minimum)
-        #:property prop
-        (lambda (self raw) (max raw (at-least-minimum self))))
-      (define seen (make-recorder))
+      (define (schema raw)
+        (unless (number? raw) (raise-validation-error (list (cons '(port) "expected a number"))))
+        raw)
       (define f (ctx-plugin ctx
-                            (named "clamped" (lambda (c config) (note! seen config) (void))
-                                   #:config (at-least 10))
-                            3))
-      (await f)
-      (check-equal? (notes seen) '(10))
-      (check-eqv? (fiber-config f) 3)
-      (check-eqv? (fiber-effective-config f) 10))))
+                            (named "validated" (lambda (c config) (void)) #:config schema)
+                            'not-a-number))
+      (settle f)
+      (check-eq? (fiber-state f) 'failed)
+      (check-pred exn:fail:cordis:validation? (fiber-error f))
+      (check-equal? (exn-message (fiber-error f))
+                    "invalid config:\n  - expected a number (at port)"))))
+
+;; source: contract 12 addendum 3, "A fiber's context is derived from the
+;; context ctx-plugin was called on, so it inherits that context's meta, realms
+;; and interception layers"
+(test-case "fiber/context: a fiber's context inherits meta, realms and intercept layers"
+  (with-root (ctx)
+    (define scoped
+      (context-intercept
+       (context-isolate (context-extend ctx (hasheq 'loader/entry-id "entry-1" 'tier 'outer))
+                        'scoped-service)
+       'scoped-service
+       (hasheq 'level 1)))
+    (define child (box #f))
+    (define f
+      (ctx-plugin scoped
+                  (lambda (c config)
+                    (set-box! child (ctx-plugin (context-extend c (hasheq 'tier 'inner))
+                                                (lambda (cc config) (void))))
+                    (void))))
+    (await f)
+    (await (unbox child))
+    (define fc (fiber-context f))
+    (define cc (fiber-context (unbox child)))
+    (check-eq? (fiber-parent f) scoped)
+    (check-eq? (context-root cc) ctx)
+    (check-equal? (context-meta fc 'loader/entry-id) "entry-1")
+    (check-equal? (context-meta cc 'loader/entry-id) "entry-1")
+    (check-eq? (context-meta fc 'tier) 'outer)
+    (check-eq? (context-meta cc 'tier) 'inner)
+    (define realm (context-realm scoped 'scoped-service))
+    (check-true (symbol? realm))
+    (check-eq? (context-realm fc 'scoped-service) realm)
+    (check-eq? (context-realm cc 'scoped-service) realm)
+    (check-false (eq? (context-realm ctx 'scoped-service) realm))
+    (check-equal? (context-intercepts fc 'scoped-service) (list (hasheq 'level 1)))
+    (check-equal? (context-intercepts cc 'scoped-service) (list (hasheq 'level 1)))
+    ;; A service provided through the fiber's context lands in the inherited realm.
+    (ctx-provide fc 'scoped-service 'inside)
+    (check-eq? (ctx-get scoped 'scoped-service) 'inside)
+    (check-false (ctx-get ctx 'scoped-service))))
 
 ;; source: contract 6 rule 3, "validate the config through the
 ;; 'internal/config waterfall"; events.ts kernel listener; recon 01 S13
@@ -797,3 +894,36 @@
     (fiber-update! f 'v2)
     (check-equal? (notes resolutions) '(v2 v2))
     (check-eq? (fiber-effective-config f) 'v2)))
+
+;; source: contract 3, "Every public kernel operation that mutates state may be
+;; called from any thread. When called outside a task it runs through
+;; call-in-kernel on the root's scheduler"; contract 2 rule 5 (await of a fiber
+;; outside a task) and rule 7
+(test-case "context/threads: kernel operations may be called from a plain thread"
+  (with-root (ctx)
+    (define sched (context-scheduler ctx))
+    (define log (make-recorder))
+    (ctx-on ctx 'spec/threaded (lambda (x) (note! log (list 'heard x (in-task? sched)))))
+    (define outcome (box 'not-run))
+    (define worker
+      (thread
+       (lambda ()
+         (set-box!
+          outcome
+          (with-handlers ([(lambda (e) #t) values])
+            (define d (ctx-provide ctx 'threaded 'value))
+            (define f
+              (ctx-inject ctx '(threaded)
+                          (lambda (c)
+                            (note! log (list 'apply (ctx-ref c 'threaded) (in-task? sched)))
+                            (lambda () (note! log 'unload)))))
+            (define awaited (await f))
+            (define state (fiber-state f))
+            (ctx-emit ctx 'spec/threaded 1)
+            (fiber-dispose! f)
+            (d)
+            (list (eq? awaited f) state (fiber-state f) (ctx-has? ctx 'threaded)
+                  (in-task? sched)))))))
+    (await (thread-dead-evt worker))
+    (check-equal? (unbox outcome) '(#t active disposed #f #f))
+    (check-equal? (notes log) '((apply value #t) (heard 1 #t) unload))))

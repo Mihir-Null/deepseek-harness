@@ -63,6 +63,39 @@
     (check-equal? (context-meta ctx 'a 'default) 'default)
     (check-equal? (context-meta shadowed 'missing 'default) 'default)))
 
+(test-case "derivation: a fiber's context inherits meta, realms and intercepts of its ancestors"
+  ;; contract section 12, item 3
+  (with-root-context (ctx)
+    (define realm (make-realm 'db))
+    (define mounted-on
+      (context-intercept (context-isolate (context-extend ctx (hasheq 'loader/entry-id "row-1"))
+                                          'db realm)
+                         'db (hasheq 'layer 'outer)))
+    (define child #f)
+    (define parent
+      (ctx-plugin mounted-on
+                  (lambda (c config)
+                    (set! child (ctx-plugin (context-extend c (hasheq 'depth 2))
+                                            (make-plugin (lambda (c config) (void))
+                                                         #:inject (hasheq 'db (hasheq 'layer 'own)))))
+                    (ctx-provide c 'db 'scoped))))
+    (await/t parent)
+    (await/t child)
+    (define pc (fiber-context parent))
+    (define cc (fiber-context child))
+    (check-eq? (context-parent pc) mounted-on)
+    (check-equal? (context-meta pc 'loader/entry-id) "row-1")
+    (check-equal? (context-meta cc 'loader/entry-id) "row-1")
+    (check-equal? (context-meta cc 'depth) 2)
+    (check-false (context-meta pc 'depth))
+    (check-eq? (context-realm pc 'db) realm)
+    (check-eq? (context-realm cc 'db) realm)
+    (check-equal? (context-intercepts pc 'db) (list (hasheq 'layer 'outer)))
+    (check-equal? (context-intercepts cc 'db) (list (hasheq 'layer 'outer) (hasheq 'layer 'own)))
+    ;; the service lives in the inherited realm only
+    (check-equal? (ctx-ref cc 'db) 'scoped)
+    (check-false (ctx-has? ctx 'db))))
+
 (test-case "isolate: a child realm, a joined realm, and the unchanged parent"
   (with-root-context (ctx)
     (ctx-provide ctx 'db 'shared)

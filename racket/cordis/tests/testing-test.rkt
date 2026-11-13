@@ -218,3 +218,63 @@
     (check-eq? (vector-ref (car events) 3) 'cordis)
     (check-pred exn:fail:user? (vector-ref (car events) 2))
     (check-regexp-match #rx"reporter" (vector-ref (car events) 1))))
+
+;; ---------------------------------------------------------------------------------------
+;; call-contained (contract section 12, item 4)
+
+(test-case "call-contained: returns the thunk's values"
+  (with-root-context (ctx)
+    (check-equal? (call-contained ctx (lambda () 'value)) 'value)
+    (check-equal? (call-with-values (lambda () (call-contained ctx (lambda () (values 1 2))))
+                                    list)
+                  '(1 2))
+    (define-values (_ events) (capture-log (lambda () (call-contained ctx void))))
+    (check-equal? events '())))
+
+(test-case "call-contained: an exn:fail is logged on the context's logger and becomes void"
+  (with-root-context (ctx)
+    (define f (ctx-plugin ctx (make-plugin (lambda (c config) (void)) #:name "Container")))
+    (await/t f)
+    (define c (fiber-context f))
+    (define failure (exn:fail:user "it failed" (current-continuation-marks)))
+    ;; a receiver on the fiber's own logger and one on the cordis logger both see the report
+    (define own (make-log-receiver (ctx-logger c) 'error))
+    (define-values (result events)
+      (capture-log (lambda () (call-contained c (lambda () (raise failure)) #:label "step"))))
+    (check-equal? result (void))
+    (check-equal? (length events) 1)
+    (check-eq? (vector-ref (car events) 0) 'error)
+    (check-equal? (vector-ref (car events) 1) "cordis: Container: step: it failed")
+    (check-eq? (vector-ref (car events) 2) failure)
+    (check-eq? (vector-ref (car events) 3) 'cordis)
+    (check-eq? (vector-ref (sync/t own) 2) failure)
+    ;; without a label; every call reports, also for an exception seen before
+    (define-values (_ again)
+      (capture-log (lambda ()
+                     (call-contained c (lambda () (raise failure)))
+                     (call-contained ctx (lambda () (raise failure)) #:label 'root-step))))
+    (check-equal? (map (lambda (e) (vector-ref e 1)) again)
+                  '("cordis: Container: it failed" "cordis: root: root-step: it failed"))))
+
+(test-case "call-contained: breaks and values that are not exn:fail propagate"
+  (with-root-context (ctx)
+    (define-values (outcomes events)
+      (capture-log
+       (lambda ()
+         (list (with-handlers ([symbol? values])
+                 (call-contained ctx (lambda () (raise 'not-an-exception))))
+               (with-handlers ([exn:break? (lambda (e) 'break)])
+                 (call-contained ctx (lambda ()
+                                       (break-thread (current-thread))
+                                       (task-check-break)
+                                       'not-broken)))))))
+    (check-equal? outcomes '(not-an-exception break))
+    (check-equal? events '())))
+
+(test-case "call-contained: usable from a thread that is not a task"
+  (define root (make-root-context))
+  (define-values (result events)
+    (capture-log (lambda () (call-contained root (lambda () (error "outside"))))))
+  (check-equal? result (void))
+  (check-equal? (length events) 1)
+  (context-shutdown! root))

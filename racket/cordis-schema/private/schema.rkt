@@ -17,7 +17,8 @@
          "js.rkt"
          "../volatile.rkt")
 
-(provide (struct-out schema)
+(provide (struct-out node)
+         (rename-out [node? schema?])
          make-node
          copy-node
          ;; metadata
@@ -64,14 +65,14 @@
 ;; preserve    : (void) when not passed, else the value passed (transform)
 ;; builder     : thunk or #f (lazy)
 ;; cell        : box holding the built schema or #f (lazy); #f for other types
-;; prebuilt?   : a lazy node read from JSON, whose builder returns the schema as it is
+;; prebuilt?   : a lazy node read from JSON; its builder only looks the built schema up, so it
+;;               may run at any time
 ;; resolver    : custom resolver or #f
 ;; formatter   : custom type-string procedure or #f
 ;; order       : the node's property names in the order the JSON form writes them
-(struct schema (type meta inner key members fields bits value callback source constructor pred
+(struct node (type meta inner key members fields bits value callback source constructor pred
                      preserve builder cell prebuilt? resolver formatter order)
-  #:constructor-name raw-schema
-  #:omit-define-syntaxes
+  #:constructor-name raw-node
   #:property prop:procedure
   (lambda (self [data (void)] #:autofix? [autofix? #f] #:ignore [ignore #f] #:path [path '()])
     (unless (valid-path? path)
@@ -104,22 +105,22 @@
                    #:resolver [resolver #f]
                    #:formatter [formatter #f]
                    #:order [order '(type meta)])
-  (raw-schema type meta inner key members fields bits value callback source constructor pred
+  (raw-node type meta inner key members fields bits value callback source constructor pred
               preserve builder (and builder (box #f)) prebuilt? resolver formatter order))
 
 ;; A copy of `s` with the given parts replaced. A copy of a lazy node builds its own schema, so
 ;; that metadata set on the copy reaches what it builds.
 (define (copy-node s
-                   #:meta [meta (schema-meta s)]
-                   #:inner [inner (schema-inner s)]
-                   #:key [key (schema-key s)]
-                   #:members [members (schema-members s)]
-                   #:fields [fields (schema-fields s)]
-                   #:builder [builder (schema-builder s)])
-  (raw-schema (schema-type s) meta inner key members fields (schema-bits s) (schema-value s)
-              (schema-callback s) (schema-source s) (schema-constructor s) (schema-pred s)
-              (schema-preserve s) builder (and builder (box #f)) (schema-prebuilt? s)
-              (schema-resolver s) (schema-formatter s) (schema-order s)))
+                   #:meta [meta (node-meta s)]
+                   #:inner [inner (node-inner s)]
+                   #:key [key (node-key s)]
+                   #:members [members (node-members s)]
+                   #:fields [fields (node-fields s)]
+                   #:builder [builder (node-builder s)])
+  (raw-node (node-type s) meta inner key members fields (node-bits s) (node-value s)
+              (node-callback s) (node-source s) (node-constructor s) (node-pred s)
+              (node-preserve s) builder (and builder (box #f)) (node-prebuilt? s)
+              (node-resolver s) (node-formatter s) (node-order s)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Metadata
@@ -139,47 +140,46 @@
   (make-jobject (filter (lambda (entry) (not (void? (cdr entry)))) meta)))
 
 (define (schema-meta-ref s key [default (void)])
-  (define value (meta-ref (schema-meta s) key))
+  (define value (meta-ref (node-meta s) key))
   (if (void? value) default value))
 
 (define (schema-meta-jobject s)
-  (meta->jobject (schema-meta s)))
+  (meta->jobject (node-meta s)))
 
 (define (meta-true? s key)
-  (js-truthy? (meta-ref (schema-meta s) key)))
+  (js-truthy? (meta-ref (node-meta s) key)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Lazy nodes
 
 ;; The schema a lazy node stands for, built on first use. The built schema's metadata is the
-;; lazy node's, overridden by its own.
+;; lazy node's, overridden by its own. When that leaves the built schema's metadata as it is,
+;; the node stands for the built schema itself, so a recursive schema refers back to the same
+;; value.
 (define (lazy-inner s)
-  (define cell (schema-cell s))
+  (define cell (node-cell s))
   (or (unbox cell)
-      (let* ([built ((schema-builder s))]
-             [inner
-              (cond
-                [(not (schema? built))
-                 (raise-arguments-error 'schema-lazy "builder did not return a schema"
-                                        "result" built)]
-                [(schema-prebuilt? s) built]
-                [else
-                 (copy-node built
-                            #:meta (for/fold ([meta (schema-meta s)])
-                                             ([entry (in-list (schema-meta built))])
-                                     (meta-set meta (car entry) (cdr entry))))])])
+      (let* ([built ((node-builder s))]
+             [_ (unless (node? built)
+                  (raise-arguments-error 'schema-lazy "builder did not return a schema"
+                                         "result" built))]
+             [merged (for/fold ([meta (node-meta s)]) ([entry (in-list (node-meta built))])
+                       (meta-set meta (car entry) (cdr entry)))]
+             [inner (if (equal? merged (node-meta built))
+                        built
+                        (copy-node built #:meta merged))])
         (set-box! cell inner)
         inner)))
 
 ;; The built schema, or #f when the node was not used yet. Never runs a caller's builder.
 (define (lazy-built s)
   (cond
-    [(unbox (schema-cell s)) => values]
-    [(schema-prebuilt? s) (lazy-inner s)]
+    [(unbox (node-cell s)) => values]
+    [(node-prebuilt? s) (lazy-inner s)]
     [else #f]))
 
 (define (lazy? s)
-  (and (schema-builder s) #t))
+  (and (node-builder s) #t))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Options and errors
@@ -231,10 +231,10 @@
 ;; source: vendor/schemastery/src/index.ts (formatters)
 
 (define (schema->string s [inline? #f])
-  (define type (schema-type s))
+  (define type (node-type s))
   (define text
     (cond
-      [(schema-formatter s) => (lambda (format) (format s inline?))]
+      [(node-formatter s) => (lambda (format) (format s inline?))]
       [else (format-builtin s type inline?)]))
   (if (nullable? text)
       (format "Schema<~a>" type)
@@ -246,17 +246,17 @@
 (define (format-builtin s type inline?)
   (case type
     [("any" "never" "string" "number" "boolean" "bitset" "function") type]
-    [("is") (schema-constructor s)]
+    [("is") (node-constructor s)]
     [("const")
-     (define value (schema-value s))
+     (define value (node-value s))
      (if (string? value) (jvalue->string value) value)]
-    [("array") (string-append (child->string (schema-inner s) #t) "[]")]
+    [("array") (string-append (child->string (node-inner s) #t) "[]")]
     [("dict")
-     (format "{ [key: ~a]: ~a }" (child->string (schema-key s)) (child->string (schema-inner s)))]
+     (format "{ [key: ~a]: ~a }" (child->string (node-key s)) (child->string (node-inner s)))]
     [("tuple")
-     (format "[~a]" (string-join (map child->string (or (schema-members s) '())) ", "))]
+     (format "[~a]" (string-join (map child->string (or (node-members s) '())) ", "))]
     [("object")
-     (define fields (or (schema-fields s) empty-jobject))
+     (define fields (or (node-fields s) empty-jobject))
      (if (zero? (jcount fields))
          "{}"
          (format "{ ~a }"
@@ -266,13 +266,13 @@
                             (schema->string child)))
                   ", ")))]
     [("union")
-     (define text (string-join (map child->string (or (schema-members s) '())) " | "))
+     (define text (string-join (map child->string (or (node-members s) '())) " | "))
      (if inline? (string-append "(" text ")") text)]
     [("intersect")
-     (string-join (for/list ([member (in-list (or (schema-members s) '()))])
+     (string-join (for/list ([member (in-list (or (node-members s) '()))])
                     (schema->string member #t))
                   " & ")]
-    [("transform") (child->string (schema-inner s) inline?)]
+    [("transform") (child->string (node-inner s) inline?)]
     [else (void)]))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -296,16 +296,16 @@
       (when (and volatile? blocked?)
         (raise-schema-error placement-message (reverse rpath)))
       (define nested? (or blocked? volatile?))
-      (when (schema-fields s)
-        (for ([(key child) (in-jobject (schema-fields s))])
+      (when (node-fields s)
+        (for ([(key child) (in-jobject (node-fields s))])
           (visit child (cons key rpath) nested?)))
-      (when (schema-key s)
-        (visit (schema-key s) (cons '<key> rpath) #t))
-      (define inner (if (lazy? s) (lazy-built s) (schema-inner s)))
+      (when (node-key s)
+        (visit (node-key s) (cons '<key> rpath) #t))
+      (define inner (if (lazy? s) (lazy-built s) (node-inner s)))
       (when inner
         (visit inner (cons '* rpath) #t))
-      (when (schema-members s)
-        (for ([member (in-list (schema-members s))]
+      (when (node-members s)
+        (for ([member (in-list (node-members s))]
               [index (in-naturals)])
           (visit member (cons (string->symbol (number->string index)) rpath) #t))))))
 
@@ -326,7 +326,7 @@
 (define (resolve* data s options strict?)
   (cond
     [(meta-true? s 'volatile)
-     (define plain (copy-node s #:meta (meta-set (schema-meta s) 'volatile #f)))
+     (define plain (copy-node s #:meta (meta-set (node-meta s) 'volatile #f)))
      (define-values (value adapted data*) (resolve* data plain options strict?))
      (values (wrap-volatile value options) adapted data*)]
     [(let ([ignore (resolve-options-ignore options)])
@@ -347,10 +347,10 @@
 ;; The default of `s`, or of the first member of an intersect that has none, recursively.
 (define (fallback-default s)
   (let loop ([current s])
-    (define fallback (meta-ref (schema-meta current) 'default))
-    (define members (schema-members current))
+    (define fallback (meta-ref (node-meta current) 'default))
+    (define members (node-members current))
     (if (and (nullable? fallback)
-             (equal? (schema-type current) "intersect")
+             (equal? (node-type current) "intersect")
              (pair? members))
         (loop (car members))
         fallback)))
@@ -363,15 +363,15 @@
 (define (run-resolver data s options strict?)
   (define resolver
     (cond
-      [(schema-resolver s) => custom-resolver]
+      [(node-resolver s) => custom-resolver]
       [(lazy? s) resolve-lazy]
-      [else (hash-ref resolvers (schema-type s) #f)]))
+      [else (hash-ref resolvers (node-type s) #f)]))
   (unless resolver
-    (raise-schema-error (format "unsupported type \"~a\"" (schema-type s)) options))
+    (raise-schema-error (format "unsupported type \"~a\"" (node-type s)) options))
   (if (meta-true? s 'loose)
       ;; Schemastery returns the default whatever the resolver threw.
       (with-handlers ([exn:fail? (lambda (e)
-                                   (values (meta-ref (schema-meta s) 'default) (void) data))])
+                                   (values (meta-ref (node-meta s) 'default) (void) data))])
         (resolver data s options strict?))
       (resolver data s options strict?)))
 
@@ -482,7 +482,7 @@
       ;; With autofix a failure of any kind removes the property and yields the default.
       (with-handlers ([exn:fail?
                        (lambda (e)
-                         (define fallback (if child (meta-ref (schema-meta child) 'default) (void)))
+                         (define fallback (if child (meta-ref (node-meta child) 'default) (void)))
                          (values (if (and child (meta-true? child 'volatile))
                                      (make-volatile fallback)
                                      fallback)
@@ -508,7 +508,7 @@
   (expected "nullable" data options))
 
 (define (resolve-const data s options strict?)
-  (define value (schema-value s))
+  (define value (node-value s))
   (unless (deep-equal? data value)
     (expected (js-string value) data options))
   (values value (void) data))
@@ -516,7 +516,7 @@
 (define (resolve-string data s options strict?)
   (unless (string? data)
     (expected "string" data options))
-  (define meta (schema-meta s))
+  (define meta (node-meta s))
   (define pattern (meta-ref meta 'pattern))
   (when (js-truthy? pattern)
     (define source
@@ -535,7 +535,7 @@
 (define (resolve-number data s options strict?)
   (unless (real? data)
     (expected "number" data options))
-  (define meta (schema-meta s))
+  (define meta (node-meta s))
   (check-within-range data meta "number" options #f)
   (define step (meta-ref meta 'step))
   (when (js-truthy? step)
@@ -557,7 +557,7 @@
   (values data (void) data))
 
 (define (resolve-bitset data s options strict?)
-  (define bits (or (schema-bits s) empty-jobject))
+  (define bits (or (node-bits s) empty-jobject))
   (define-values (value keys)
     (cond
       [(real? data)
@@ -574,7 +574,7 @@
                      value))
                data)]
       [else (expected "number or array" data options)]))
-  (define fallback (meta-ref (schema-meta s) 'default))
+  (define fallback (meta-ref (node-meta s) 'default))
   (if (and (real? fallback) (= value fallback))
       (values value (void) data)
       (values value keys data)))
@@ -605,8 +605,8 @@
        (cons (symbol->string name) (loop super))])))
 
 (define (resolve-is data s options strict?)
-  (define name (schema-constructor s))
-  (define pred (schema-pred s))
+  (define name (node-constructor s))
+  (define pred (node-pred s))
   (unless (if pred
               (pred data)
               (and (not (nullable? data)) (member name (constructor-names data))))
@@ -616,9 +616,9 @@
 (define (resolve-array data s options strict?)
   (unless (list? data)
     (expected "array" data options))
-  (define inner (schema-inner s))
-  (check-within-range (length data) (schema-meta s) "array length" options
-                      (and inner (not (nullable? (meta-ref (schema-meta inner) 'default)))))
+  (define inner (node-inner s))
+  (check-within-range (length data) (node-meta s) "array length" options
+                      (and inner (not (nullable? (meta-ref (node-meta inner) 'default)))))
   (define-values (results data*)
     (for/fold ([results '()] [data* data]) ([index (in-range (length data))])
       (define-values (value next) (property data* index inner options))
@@ -647,20 +647,20 @@
       (cond
         [(not resolved-key) (values result data*)]
         [else
-         (define-values (value written) (property data* key (schema-inner s) options))
+         (define-values (value written) (property data* key (node-inner s) options))
          (define moved (container-set written resolved-key (jref written key (void))))
          (values (assign result resolved-key value)
                  (if (eq? key resolved-key) written (jremove moved key)))])))
   (values result (void) (if (eq? data* object) data data*)))
 
 (define (resolve-key key s options)
-  (define-values (value adapted data*) (resolve (symbol->string key) (schema-key s) options #f))
+  (define-values (value adapted data*) (resolve (symbol->string key) (node-key s) options #f))
   (string->symbol (js-string value)))
 
 (define (resolve-tuple data s options strict?)
   (unless (list? data)
     (expected "array" data options))
-  (define members (or (schema-members s) '()))
+  (define members (or (node-members s) '()))
   (define-values (results data*)
     (for/fold ([results '()] [data* data]) ([member (in-list members)] [index (in-naturals)])
       (define-values (value next) (property data* index member options))
@@ -671,12 +671,18 @@
         (list-tail data* (length members))))
   (values (append (reverse results) rest) (void) data*))
 
+;; Names every JavaScript object inherits. Schemastery tests `key in result`, which is true for
+;; them, so `merge` never copies a key with one of these names.
+(define inherited-keys
+  '(constructor toString toLocaleString valueOf hasOwnProperty isPrototypeOf propertyIsEnumerable
+                __proto__ __defineGetter__ __defineSetter__ __lookupGetter__ __lookupSetter__))
+
 ;; source: vendor/schemastery/src/index.ts (merge)
 ;; `result` with the keys of `data` it lacks, in the order of `data`. `claimed` lists keys the
 ;; result holds as `undefined`, which Schemastery does not overwrite either.
 (define (merge-missing result data [claimed '()])
   (for/fold ([result result]) ([(key value) (in-jobject data)])
-    (if (or (jhas? result key) (memq key claimed))
+    (if (or (jhas? result key) (memq key claimed) (memq key inherited-keys))
         result
         (jset result key value))))
 
@@ -686,7 +692,7 @@
   (define object (->object data))
   (define-values (result claimed data*)
     (for/fold ([result empty-jobject] [claimed '()] [data* object])
-              ([(key child) (in-jobject (or (schema-fields s) empty-jobject))])
+              ([(key child) (in-jobject (or (node-fields s) empty-jobject))])
       (define-values (value written) (property data* key child options))
       (if (or (not (nullable? value)) (jhas? written key))
           (values (assign result key value) (cons key claimed) written)
@@ -701,7 +707,7 @@
    options))
 
 (define (resolve-union data s options strict?)
-  (let loop ([members (or (schema-members s) '())])
+  (let loop ([members (or (node-members s) '())])
     (cond
       [(null? members) (expected-type s data options)]
       [else
@@ -714,20 +720,21 @@
            (loop (cdr members)))])))
 
 (define (resolve-intersect data s options strict?)
-  (define members (or (schema-members s) '()))
+  (define members (or (node-members s) '()))
   (cond
     [(null? members) (values data (void) data)]
     [else
      (define-values (result data*)
        (for/fold ([result (void)] [data* data]) ([member (in-list members)])
          (define-values (value adapted next) (resolve data* member options #t))
+         ;; A mismatch reports the data as the members resolved so far have left it.
          (values
           (cond
             [(nullable? value) result]
             [(nullable? result) value]
-            [(not (eq? (js-typeof result) (js-typeof value))) (expected-type s data options)]
+            [(not (eq? (js-typeof result) (js-typeof value))) (expected-type s next options)]
             [(eq? (js-typeof value) 'object) (merge-values result value)]
-            [(not (js-strict-equal? result value)) (expected-type s data options)]
+            [(not (js-strict-equal? result value)) (expected-type s next options)]
             [else result])
           next)))
      (values (if (and (not strict?) (plain-object? data*))
@@ -770,12 +777,12 @@
               (js-string result)))]))
 
 (define (resolve-transform data s options strict?)
-  (define-values (result adapted data*) (resolve data (schema-inner s) options #t))
-  (define callback (schema-callback s))
+  (define-values (result adapted data*) (resolve data (node-inner s) options #t))
+  (define callback (node-callback s))
   (unless (procedure? callback)
     (raise-type-error "callback is not a function"))
   (cond
-    [(js-truthy? (schema-preserve s)) (values (callback result) (void) data*)]
+    [(js-truthy? (node-preserve s)) (values (callback result) (void) data*)]
     [else
      (define value (callback result))
      (values value (callback (if (void? adapted) data* adapted)) data*)]))

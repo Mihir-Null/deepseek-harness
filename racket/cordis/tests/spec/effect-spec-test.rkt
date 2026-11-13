@@ -485,9 +485,14 @@
     (define restarted (box #f))
     (define setup-finished? #f)
     (define cleanup-finished? #f)
+    ;; The restart task is spawned inside the effect thunk, where the current
+    ;; custodian is the root fiber's; it must outlive the unload it waits for.
+    (define spawn-outside (make-spawner ctx))
     (ctx-effect ctx
                 (lambda ()
-                  (set-box! restarted (spawn-task (lambda () (fiber-restart! rf))))
+                  (set-box! restarted (spawn-outside (lambda () (fiber-restart! rf))))
+                  ;; The restart begins while this thunk is still running.
+                  (yield-task)
                   (spawn-task (lambda ()
                                 (gate-wait setup-gate)
                                 (set! setup-finished? #t)
@@ -520,6 +525,7 @@
     (define cleanup-gate (make-gate))
     (define cleanup-started (make-gate))
     (define restarted (box #f))
+    (define spawn-outside (make-spawner ctx))
     (define failing
       (spawn-task
        (lambda ()
@@ -529,7 +535,9 @@
                          (yield (lambda ()
                                   (gate-open! cleanup-started)
                                   (gate-wait cleanup-gate)))
-                         (set-box! restarted (spawn-task (lambda () (fiber-restart! rf))))
+                         (set-box! restarted (spawn-outside (lambda () (fiber-restart! rf))))
+                         ;; The restart begins before the setup fails.
+                         (yield-task)
                          (raise-user-error "setup failed after restart")))
                      #:label "reentrant-throw"))))
     (gate-wait cleanup-started)

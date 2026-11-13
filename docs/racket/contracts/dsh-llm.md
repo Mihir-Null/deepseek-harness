@@ -37,7 +37,7 @@ Public modules. Each exports through `contract-out`.
 | `dsh-llm/cancel` | Cancel sources, cancel evts and `exn:fail:abort` (Services, "Cancellation"). It requires only `racket/base`, so it is the first module of this package to be delivered. |
 | `dsh-llm/jrecord` | `define-jrecord`, `define-junion` (Data, "Record declarations"). |
 | `dsh-llm/messages` | Content blocks, message sources, messages, request-only user input, tool schemas, stream chunks, finish reasons, token usage, replay envelope; the compact timed stream (accumulator, expansion, readers); the assembler. |
-| `dsh-llm/errors` | `exn:fail:llm`, failure records, the code table, `normalize-llm-failure`, the context-overflow and quota classifiers, `error-chain`. |
+| `dsh-llm/errors` | `exn:fail:llm`, `exn:fail:llm-discovery-rejected`, failure records, the code table, `normalize-llm-failure`, the context-overflow and quota classifiers, `error-chain`. |
 | `dsh-llm/stream` | `chunk-stream`: the pull-based stream type. |
 | `dsh-llm/llm` | Service Definition for `llm`: `gen:llm-adapter`, `llm-request`, call config, prepared calls, every `llm-…` service procedure, the events `llm/stream`, `llm/adapters-updated`, `llm/models-updated`. |
 | `dsh-llm/content` | Model-visible handle texts; the request projections (files, text-only images, offloaded images, tool updates); `required-image-offload`. |
@@ -173,6 +173,7 @@ A replay envelope is `{response: jvalue, blocks?: [jvalue…]}`; both halves are
 
 ```racket
 (struct exn:fail:llm exn:fail:harness (failure))          ; failure : llm-failure; (exn:fail:harness-code e) equals its code
+(struct exn:fail:llm-discovery-rejected exn:fail:harness (details))   ; code "llm/model-discovery-rejected"; details : jobject {settingsNs, baseURL?}
 (make-llm-error code message #:status [s] #:retry-after-ms [ms] #:request-id [id] #:offload-images [n] #:cause [cause #f]) -> exn:fail:llm?
 (raise-llm-error code message #:status … #:cause …) -> none/c
 (llm-failure->exn failure #:cause [cause #f]) -> exn:fail:llm?       ; LlmError.fromFailure
@@ -183,7 +184,7 @@ A replay envelope is `{response: jvalue, blocks?: [jvalue…]}`; both halves are
 (error-chain v) -> string?
 ```
 
-`code` is a symbol or string on input and always a string in the failure. `make-llm-error` validates the bounds above and raises `exn:fail:contract` with the dsh messages (`LlmError message must be a non-empty string`, `LlmError code must be a non-empty string`, `LlmError status must be an integer from 100 through 599`, `LlmError providerRetryAfterMs must be a positive finite number`, `LlmError requestId must be a non-empty string`). `exn:fail:llm` is constructed only through these procedures, so no call site depends on the field list of `exn:fail:harness`. Its dsh error name, where `exn:fail:harness` records one (the tool pipeline persists `{name, code}`), is `LlmError`. Any code string is legal (`HTTP_<status>`, codes of other providers); the table is documentation and the source of `retry-code-choices` (`EMPTY_RESPONSE`, `MALFORMED_RESPONSE`, `QUOTA`, `RATE_LIMIT`, `SERVER`, `STREAM_CLOSED`, `TIMEOUT`, `TRANSPORT`, in that order).
+`code` is a symbol or string on input and always a string in the failure. `make-llm-error` validates the bounds above and raises `exn:fail:contract` with the dsh messages (`LlmError message must be a non-empty string`, `LlmError code must be a non-empty string`, `LlmError status must be an integer from 100 through 599`, `LlmError providerRetryAfterMs must be a positive finite number`, `LlmError requestId must be a non-empty string`). `exn:fail:llm` is constructed only through these procedures, so no call site depends on the field list of `exn:fail:harness`. Its dsh error name, which `exn:fail:harness` records (the tool pipeline persists `{name, code}` through `harness-error-info` of `dsh-tools/errors`; [WAVE3.md](WAVE3.md) lists the name field among the `dsh-util` prerequisites), is `LlmError`; that of `exn:fail:llm-discovery-rejected` is `RemoteError`. Any code string is legal (`HTTP_<status>`, codes of other providers); the table is documentation and the source of `retry-code-choices` (`EMPTY_RESPONSE`, `MALFORMED_RESPONSE`, `QUOTA`, `RATE_LIMIT`, `SERVER`, `STREAM_CLOSED`, `TIMEOUT`, `TRANSPORT`, in that order).
 
 ### Compact timed stream records
 
@@ -384,7 +385,7 @@ Obligations of every adapter (R6 "Adapter contract"; `docs/subsystems/llm-stream
 | `(llm-list-configurable-providers x) -> (listof jobject?)` | Entries in declaration order. |
 | `(llm-register-model-discovery! x settings-ns discover) -> disposer?` | `discover : (-> jobject? (or/c evt? #f) (listof jobject?))` (request, cancel). Effect labelled `llm.registerModelDiscovery()`. Errors: `INVALID_DISCOVERY` (empty namespace), `DUPLICATE_DISCOVERY`. |
 | `(llm-discover-models x settings-ns request #:cancel [cancel #f]) -> (listof jobject?)` | A5. Errors: `NO_DISCOVERY`, `INVALID_DISCOVERY`, whatever `discover` raises. |
-| `(llm-remote-discover-models x settings-ns request #:cancel [cancel #f])` | As above, but any failure is re-raised as `exn:fail:harness` with code `llm/model-discovery-rejected`, the original message, and details `{settingsNs, baseURL?}`. This is the form `dsh-web` exposes. |
+| `(llm-remote-discover-models x settings-ns request #:cancel [cancel #f])` | As above, but any failure other than a break is re-raised as `exn:fail:llm-discovery-rejected` (`dsh-llm/errors`): code `llm/model-discovery-rejected`, the original message (the `display` form of a non-exception value), details `{settingsNs, baseURL?}` in that key order, and the original value as cause where `exn:fail:harness` records one. It is the counterpart of dsh's `RemoteError`; the details live in this substruct so that nothing here depends on a details field of `exn:fail:harness`. This is the form `dsh-web` exposes. |
 | `(llm-provider-retry-policy x provider) -> retry-policy?` | The policy captured at registration or replace. `NO_ADAPTER` for an unknown route. |
 | `(llm-image-request-pricing x provider model) -> (or/c procedure? #f)` | The adapter's pricing; `#f` for an unknown route (never raises). No await. |
 | `(llm-image-request-target x provider model image-ref) -> jobject?` | Delegates to the adapter. `NO_ADAPTER`. |
@@ -463,6 +464,8 @@ This package is built before the packages that provide `attachments`, `fs`, `cre
 ```
 
 `(port-get ctx key pred)` is `(ctx-get ctx key)`; it returns `#f` when the service is absent and raises `exn:fail:contract` naming the key and the interface when a value is mounted that does not satisfy `pred`. Keys: `attachments` (`attachment-port?`), `fs` (`host-path-port?`), `credentials` (`credential-port?`), `deepseekAccount` (`account-port?`), `loader` (`inventory-port?`), `sessionProjections` (`projection-port?`), `settings` (`settings-port?`). All are optional reads except where a plugin injects them.
+
+Calling convention of ports. A port operation is a generic method, so its first argument is the provider's service value, which the consumer read from its own context with `port-get`. An operation that registers an effect or needs to know which plugin calls it (`projection-register!` and `settings-configure!` here, `config-editor-edit!` and the two operations of `gen:agent-factory` in `dsh-agent`) takes the owning context as its second argument, explicitly; the provider registers on that context and never consults `current-context`. This is ADR 0003 applied to a seam whose Service Definition lives in a later package: the owner is still an argument of the call, in second place because `racket/generic` dispatches on the provider value. The package that owns the service may add context-first procedures over the same value.
 
 Settings opt-out. dsh's DeepSeek host and its pi-ai plugin tell the settings service not to manage their loader entry automatically: `ctx.inject(['settings'], child => child.effect(() => child.settings.configure({ auto: false }, ctx.fiber)))` (`llm-deepseek/src/host.ts:47`, `llm-pi-ai/src/index.ts:175`). `register-deepseek-provider!` and the body of the `llm-pi-ai` plugin do the same: `(ctx-inject ctx '(settings) (lambda (child) (ctx-effect child (lambda () (settings-configure! (port-get child 'settings settings-port?) ctx (jobj [auto #f]))))))`. Without a `settings` service the child fiber stays pending and nothing else changes. `settings-configure!` takes the plugin's context where dsh passes its fiber; the provider reads the loader entry from it. `gen:settings-port` is defined here because this is the lowest package that calls it; `dsh-agent/ports` re-exports it for the default-model plugin, which makes the same call.
 
@@ -1066,6 +1069,9 @@ Racket-only extensions introduced here, for the coordinator to record in an ADR:
 - The mock server's command line is a Racket module (`dsh-llm/testing/mock-server-cli`).
 - Test seams with no dsh counterpart in configuration: `#:id` on message constructors, `#:http-request` on the DeepSeek adapter, `#:delay-evt` on the retry executor.
 - The `llm-pi-ai` native protocol rules P7 to P10 and the two directory `error` texts of P2.
+- The macros `define-jrecord` and `define-junion` (design note 2) and the `chunk-stream` type (design note 3).
+- Module `dsh-llm/ports`: consumer-owned generic interfaces for services of later packages, `projection-definition`, `port-get`, and the calling convention stated under "Ports" (provider value first, owning context second).
+- Modules `dsh-llm/http` and `dsh-llm/sse` (design note 12), the loop mark on `llm-request` (design note 8), `exn:fail:llm-discovery-rejected`, and `make-llm-retry-plugin`.
 
 No `x-racket` config key is introduced by this package.
 
@@ -1139,13 +1145,13 @@ Each has a default so no implementer is blocked.
 
 2. **`agent/request-error` payload.** Settled by [dsh-agent.md](dsh-agent.md): every `agent/*` payload is an immutable `hasheq` with symbol keys that `jref` reads, and it carries `'session` and `'cancel` beside the dsh keys. The `llm-retry` plugin therefore stays in this package.
 
-3. **Loader entry id.** The settings namespace needs the `id` of the plugin's loader entry (`ctx.fiber.entry?.options.id`). Default: `(context-meta ctx 'loader/entry-id #f)`, falling back to the short name.
+3. **Loader entry id.** Settled: the loader records the entry id under the context meta key `'loader/entry-id` (cordis-kernel section 12, addendum 3). The settings namespace is `(context-meta ctx 'loader/entry-id #f)`, falling back to the short name.
 
-4. **Schema features.** This contract assumes `cordis-schema` offers, beyond the constructors named in the brief, modifiers for numeric bounds (`min`, `max`, `step`), `role`, and volatile references with a reader. Default when volatile references are missing: the plugin reads `(fiber-effective-config (context-fiber ctx))` through `config-get` on each operation, which is behaviourally the same for a settings change that updates the fiber's config without a restart.
+4. **Schema features.** Settled: `cordis-schema` has the modifiers `schema-min`, `schema-max`, `schema-step` and `schema-role` (section 5), `schema-never`, and volatile references (`schema-volatile`, and `volatile?` and `volatile-ref` of `cordis-schema/volatile`), which `config-get` reads. A rejected config follows "Config validation text" of [WAVE3.md](WAVE3.md).
 
 5. **`settings.configure({auto: false}, fiber)`.** Settled in the wave 3 review: `gen:settings-port` in `dsh-llm/ports` (Services, "Ports"), shared with `dsh-agent`. The provider of the `settings` service (`dsh-platform`, wave 4) implements it; until then the injected child stays pending.
 
-6. **`dsh-util` names.** Assumed: `exn:fail:harness` with accessor `exn:fail:harness-code` and a way to construct substructs; a UUID generator; `(launch-environment-ref ctx name)` returning a string or `#f`; the Harness home path; the proxy policy `(proxy-for-url url)` returning a proxy URL or `#f`; atomic file replacement. Default: use whatever the `dsh-util` contract names; where one is missing, implement it privately here and report it.
+6. **`dsh-util` names.** Assumed: `exn:fail:harness` with accessor `exn:fail:harness-code`, a recorded dsh error name (which `dsh-tools` reads) and a way to construct substructs; a UUID generator; `(launch-environment-ref ctx name)` returning a string or `#f`; the Harness home path; the proxy policy `(proxy-for-url url)` returning a proxy URL or `#f`; atomic file replacement. `dsh-util` has no contract file yet; [WAVE3.md](WAVE3.md) collects what the five wave 3 contracts assume of it in one list. Default: use whatever `dsh-util` names; where one is missing, implement it privately here and report it.
 
 7. **HTTP client ownership.** The architecture table lists HTTP and SSE helpers under `dsh-util`; this contract owns them in `dsh-llm/http` and `dsh-llm/sse` as its task requires. Default: keep them here in wave 3; the coordinator may hoist them unchanged, in which case these modules re-export.
 
@@ -1157,6 +1163,6 @@ Each has a default so no implementer is blocked.
 
 11. **Inventory port.** Someone must implement `inventory-port` on the `loader` service value (names of active entries, versions from the resolver). Default: `dsh-boot`, which owns the resolver; until then the inventory plugin logs one warning and contributes `{version: 1, packages: []}`.
 
-12. **Remote error.** `llm-remote-discover-models` raises a plain `exn:fail:harness` with code `llm/model-discovery-rejected`; `dsh-web` decides how that maps to its remote error type.
+12. **Remote error.** `llm-remote-discover-models` raises `exn:fail:llm-discovery-rejected`, a substruct of `exn:fail:harness` with code `llm/model-discovery-rejected` and a `details` field; `dsh-web` decides how that maps to its remote error type.
 
 13. **Version string.** `user-agent` reports `0.2.2-rc.2`, the dsh version of the pinned commit, so the provider sees the same product token. The coordinator may prefer a distinct suffix for the Racket harness; the `DSH_USER_AGENT_SUFFIX` mechanism already allows it without a code change.

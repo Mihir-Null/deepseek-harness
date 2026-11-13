@@ -14,7 +14,7 @@
 
 (provide bailed?
          ctx-on ctx-once ctx-emit ctx-parallel ctx-serial ctx-bail ctx-waterfall
-         ctx-dispatch ctx-listeners
+         ctx-dispatch ctx-dispatch-callbacks ctx-listeners
          dispatch-emit dispatch-bail dispatch-waterfall emit-contained
          add-hook! install-event-hooks! contain)
 
@@ -194,6 +194,21 @@
        [(waterfall) (dispatch-waterfall ctx key args (or inner void) #:filter accept?)]
        [else (raise-argument-error 'ctx-dispatch
                                    "(or/c 'emit 'parallel 'serial 'bail 'waterfall)" mode)]))))
+
+;; The listeners a dispatch of `name` in `mode` from `ctx` would call, in dispatch order,
+;; resolved now: `internal/dispatch` observers are told as for a real dispatch, and later
+;; registrations and removals do not change the result. Each element takes the dispatch
+;; arguments and calls one listener under its registering context, as a kernel task when the
+;; caller is not one.
+;; source: vendor/cordis/src/events.ts (dispatch)
+(define (ctx-dispatch-callbacks ctx mode name args #:filter [accept? #f])
+  (define key (->key name))
+  (call/kernel
+   ctx
+   (lambda ()
+     (for/list ([h (in-list (resolve ctx mode key args accept?))])
+       (lambda listener-args
+         (call/kernel ctx (lambda () (call-listener h listener-args))))))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Registration

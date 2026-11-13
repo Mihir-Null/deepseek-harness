@@ -1,7 +1,9 @@
 #lang racket/base
 ;; Black-box specification tests for cordis/task: the scheduler, the baton and
-;; `await`. One test case per numbered rule of contract section 2
+;; `await`. At least one test case per numbered rule of contract section 2
 ;; (docs/racket/contracts/cordis-kernel.md); the comment in each case names it.
+;; Rule 4 is tested as the cooperative-break rule of contract section 12,
+;; addendum 1: a break reaches a task only at a release point.
 (require cordis/task
          (only-in cordis exn:fail:cordis? exn:fail:cordis:task-killed?)
          (only-in cordis/testing capture-log)
@@ -162,21 +164,101 @@
        (await b)
        (check-equal? (notes log) '(b-cancelled b-end a-broken))))))
 
-;; source: contract 2 rule 4, second sentence; ADR 0002 ("cancels it even in a CPU loop")
-(test-case "task rule 4: a break while the task runs is raised where breaks are enabled"
+;; source: contract 2 rule 4, "Breaks are disabled while a task holds the baton"
+;; and "A break delivered while the task runs stays pending and is raised at
+;; its next release point"; contract 12 addendum 1
+(test-case "task rule 4: a break while the task runs stays pending until the next release point"
   (with-scheduler (s)
-    (define started (make-semaphore 0))
-    (define t (spawn-task
-               (lambda ()
-                 (with-handlers ([exn:break? (lambda (e) 'broken)])
-                   (semaphore-post started)
-                   (let loop () (loop))))))
-    (check-true (and (sync/timeout spec-timeout started) #t))
+    (define log (make-recorder))
+    (define running (make-semaphore 0))
+    (define resume (make-semaphore 0))
+    (define t
+      (spawn-task
+       (lambda ()
+         (with-handlers ([exn:break? (lambda (e) (note! log 'raised-at-release) 'broken)])
+           (semaphore-post running)
+           ;; A plain sync is not a release point: the task keeps the baton.
+           (sync resume)
+           (note! log 'ran-past-the-break)
+           (spin)
+           (note! log 'still-running)
+           (yield-task)
+           (note! log 'not-broken)
+           'finished))))
+    (check-true (and (sync/timeout spec-timeout running) #t))
     (task-cancel! t)
+    (semaphore-post resume)
     (define finished (sync/timeout spec-timeout t))
     (unless finished (task-kill! t))
     (check-eq? finished t)
-    (when finished (check-eq? (task-result t) 'broken))))
+    (when finished (check-eq? (task-result t) 'broken))
+    (check-equal? (notes log) '(ran-past-the-break still-running raised-at-release))))
+
+;; source: contract 2, "(task-check-break) -> void? ; raise a pending break now,
+;; if any"; rule 4, last sentence; rule 1 (it is not among the release points);
+;; contract 12 addendum 1
+(test-case "task rule 4: task-check-break raises a pending break and never releases the baton"
+  (define check-break (optional-binding 'cordis/task 'task-check-break))
+  (check-true (procedure? check-break) "cordis/task must export task-check-break")
+  (when (procedure? check-break)
+    (with-scheduler (s)
+      (define log (make-recorder))
+      (define running (make-semaphore 0))
+      (define resume (make-semaphore 0))
+      (define t
+        (spawn-task
+         (lambda ()
+           (define other (spawn-task (lambda () (note! log 'other-task))))
+           ;; Nothing is pending: the call returns and `other` has not run.
+           (note! log (check-break))
+           (note! log 'no-break-pending)
+           (await other)
+           (with-handlers ([exn:break? (lambda (e) (note! log 'raised-by-check) (in-task?))])
+             (semaphore-post running)
+             (sync resume)
+             (note! log 'before-check)
+             (check-break)
+             (note! log 'not-broken)
+             'finished))))
+      (check-true (and (sync/timeout spec-timeout running) #t))
+      (task-cancel! t)
+      (semaphore-post resume)
+      (define finished (sync/timeout spec-timeout t))
+      (unless finished (task-kill! t))
+      (check-eq? finished t)
+      ;; The handler's value is (in-task?): the break was raised under the baton.
+      (when finished (check-eq? (task-result t) #t))
+      (check-equal? (notes log)
+                    (list (void) 'no-break-pending 'other-task 'before-check 'raised-by-check)))))
+
+;; source: contract 2 rule 4, "kernel and plugin code between two awaits is
+;; never interrupted. A task that never reaches a release point can only be
+;; stopped with task-kill!"
+(test-case "task rule 4: a task without a release point is stopped by task-kill! only"
+  (with-scheduler (s)
+    (define log (make-recorder))
+    (define running (make-semaphore 0))
+    (define stop (make-semaphore 0))
+    (define left (make-semaphore 0))
+    (define t
+      (spawn-task
+       (lambda ()
+         (with-handlers ([exn:break? (lambda (e) (note! log 'interrupted) (raise e))])
+           (semaphore-post running)
+           (let loop () (unless (semaphore-try-wait? stop) (loop)))
+           (note! log 'first-loop-ran-to-its-end)
+           (semaphore-post left)
+           (let forever () (forever))))))
+    (check-true (and (sync/timeout spec-timeout running) #t))
+    (task-cancel! t)
+    (semaphore-post stop)
+    ;; `left` is posted only if the pending break did not interrupt the first loop.
+    (check-eq? (sync/timeout spec-timeout left t) left)
+    (check-equal? (notes log) '(first-loop-ran-to-its-end))
+    (task-kill! t)
+    (check-eq? (sync/timeout spec-timeout t) t)
+    (check-exn exn:fail:cordis:task-killed? (lambda () (task-result t)))
+    (check-eq? (run-task (lambda () 'next-task-ran)) 'next-task-ran)))
 
 ;; source: contract 2 rule 5
 (test-case "task rule 5: await outside a task is plain sync"
@@ -353,10 +435,13 @@
   (define s (make-scheduler #:name 'doomed #:custodian cust))
   (define holding (make-semaphore 0))
   (define ran? (box #f))
-  (define holder
-    (spawn-task (lambda () (semaphore-post holding) (sync never)) #:scheduler s))
-  (check-true (and (sync/timeout spec-timeout holding) #t))
-  (define pending (spawn-task (lambda () (set-box! ran? #t)) #:scheduler s))
+  ;; The task threads belong to `cust` too, so that the test leaves none behind.
+  (define-values (holder pending)
+    (parameterize ([current-custodian cust])
+      (define holder
+        (spawn-task (lambda () (semaphore-post holding) (sync never)) #:scheduler s))
+      (check-true (and (sync/timeout spec-timeout holding) #t))
+      (values holder (spawn-task (lambda () (set-box! ran? #t)) #:scheduler s))))
   (scheduler-shutdown! s)
   (task-kill! holder)
   ;; Nothing can make `pending` run now; the bounded wait only gives a wrong
@@ -423,9 +508,14 @@
          (lambda ()
            (parameterize ([warn-ms limit])
              (with-scheduler (s)
+               ;; `sleep` holds the baton here on purpose: the rule is about
+               ;; the time between two release points.
                (define t (spawn-task (lambda () (sleep 0.05) 'held) #:name 'slowpoke))
-               (sync/timeout spec-timeout t)
-               (task-result t))))
+               (define finished (sync/timeout spec-timeout t))
+               ;; A second task makes the scheduler take the baton back from
+               ;; `slowpoke` before the log is read.
+               (run-task void)
+               (and finished (task-result t)))))
          #:level 'warning
          #:topic 'cordis))
       (check-eq? result 'held)

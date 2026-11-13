@@ -338,7 +338,9 @@
 ;; before ctx-plugin continues, as the synchronous part of dispose() does.
 (test-case "case 18: a loading parent joins a child cleanup that started earlier"
   (with-root (ctx)
-    (define sched (context-scheduler ctx))
+    ;; The observer runs inside the owner's body; the disposal tasks must not
+    ;; belong to the owner's activation custodian, which the unload shuts down.
+    (define spawn-outside (make-spawner ctx))
     (define cleanup-gate (make-gate))
     (define cleanup-started (make-gate))
     (define owner-fiber (box #f))
@@ -356,10 +358,9 @@
                                 (gate-wait cleanup-gate)))
                             #:label "loading-child-cleanup")
                 (set-box! owner-disposal
-                          (spawn-task (lambda () (fiber-dispose! (unbox owner-fiber)))
-                                      #:scheduler sched))
+                          (spawn-outside (lambda () (fiber-dispose! (unbox owner-fiber)))))
                 (set-box! child-disposal
-                          (spawn-task (lambda () (fiber-dispose! fiber)) #:scheduler sched))
+                          (spawn-outside (lambda () (fiber-dispose! fiber))))
                 (yield-until (lambda () (not (fiber-uid fiber)))))))
     (define owner-mount
       (ctx-plugin ctx
@@ -383,7 +384,7 @@
 ;; internal/plugin await the unpublished child to quiescence" (recon case 19)
 (test-case "case 19: disposing the parent during publication drains the unpublished child"
   (with-root (ctx)
-    (define sched (context-scheduler ctx))
+    (define spawn-outside (make-spawner ctx))
     (define owner-ctx (box #f))
     (define owner
       (ctx-plugin ctx (make-plugin (lambda (inner config) (set-box! owner-ctx inner) (void))
@@ -412,7 +413,7 @@
             (lambda (fiber)
               (when (new-child? fiber)
                 (set-box! parent-disposal
-                          (spawn-task (lambda () (fiber-dispose! owner)) #:scheduler sched))
+                          (spawn-outside (lambda () (fiber-dispose! owner))))
                 ;; Let the disposal reach its wait: the parent is then unloading.
                 (yield-until (lambda () (eq? (fiber-state owner) 'unloading))))))
     (define child

@@ -1,9 +1,15 @@
 #lang racket/base
-;; Break discipline for kernel code. `critical` runs kernel bookkeeping with breaks disabled
-;; and remembers the break state of the code that entered the kernel; `call-user` runs a
+;; Break discipline for kernel code.
+;;
+;; A task runs with breaks disabled and accepts a break only at a release point reached
+;; under the break state it started with (see scheduler.rkt). `critical` runs kernel
+;; bookkeeping under a break state of its own, so a wait inside it is never interrupted, and
+;; remembers the break state of the code that entered the kernel. `call-user` runs a
 ;; callback (plugin body, listener, inverse, or a wait made on the caller's behalf) under
-;; that remembered state. A break therefore reaches user code and waits, never a half-done
-;; kernel update.
+;; that remembered state, so a wait there accepts a break exactly when the caller's own
+;; wait would. A break therefore reaches user code at its wait points and never a half-done
+;; kernel update. On a thread that is not a task, where breaks may be enabled, `critical`
+;; also keeps an asynchronous break out of the bookkeeping.
 (provide critical call-critical call-user)
 
 (define user-breaks-key (make-continuation-mark-key 'cordis-user-breaks))

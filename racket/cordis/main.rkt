@@ -44,6 +44,9 @@
   [make-validation-error (-> (listof (cons/c list? string?)) exn:fail:cordis:validation?)]
   [raise-validation-error (-> (listof (cons/c list? string?)) none/c)]
   [ctx-logger (->* (context?) ((or/c symbol? string? #f)) logger?)]
+  ;; Calls thunk; an `exn:fail` it raises is logged at `error` on ctx's logger and the result
+  ;; is then (void). Breaks and other raised values propagate.
+  [call-contained (->* (context? (-> any)) (#:label (or/c string? symbol? #f)) any)]
 
   ;; section 3: contexts
   [make-root-context (->* ()
@@ -144,6 +147,13 @@
                      (#:filter (or/c #f (and/c procedure? (procedure-arity-includes/c 1)))
                       #:inner (or/c #f (-> any)))
                      any)]
+  ;; The listeners a dispatch would call, in dispatch order, after `internal/dispatch` was
+  ;; emitted as for a real dispatch. Each takes the dispatch arguments.
+  [ctx-dispatch-callbacks (->* (context? (or/c 'emit 'parallel 'serial 'bail 'waterfall)
+                                         key? list?)
+                               (#:filter (or/c #f (and/c procedure?
+                                                         (procedure-arity-includes/c 1))))
+                               (listof procedure?))]
   [ctx-listeners (-> context? key? (listof procedure?))]
   [bailed? (-> any/c boolean?)]))
 

@@ -57,18 +57,6 @@
 (define (problem! problems fmt . args)
   (note! problems (apply format fmt args)))
 
-;; A comparison form of kernel-snapshot that ignores list order, because
-;; confluence is stated up to observational equivalence and creation order
-;; differs between schedules.
-(define (normalize v)
-  (define (repr x) (format "~s" x))
-  (cond [(hash? v)
-         (sort (for/list ([(k x) (in-hash v)]) (cons (repr k) (normalize x))) string<? #:key car)]
-        [(list? v) (sort (map normalize v) string<? #:key repr)]
-        [(pair? v) (cons (normalize (car v)) (normalize (cdr v)))]
-        [(vector? v) (normalize (vector->list v))]
-        [else v]))
-
 ;; ---------------------------------------------------------------------------
 ;; Law 18: any-order revert
 
@@ -451,7 +439,10 @@
   (for/list ([k (in-list (graph-keys (env-specs e)))]) (cons k (ctx-get (env-ctx e) k))))
 
 (define (observation e)
-  (list (observed-states e) (observed-values e) (normalize (kernel-snapshot (env-ctx e)))))
+  ;; `comparable` ignores list order and realm identity: confluence is stated
+  ;; up to observational equivalence, and creation order differs between
+  ;; schedules.
+  (list (observed-states e) (observed-values e) (comparable (kernel-snapshot (env-ctx e)))))
 
 ;; Digest law 21, checked through public accessors at any point of a schedule.
 (define (check-well-formed! e where)

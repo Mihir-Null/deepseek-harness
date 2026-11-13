@@ -696,12 +696,14 @@
       (await consumer)
       (fiber-restart! provider)
       (settle consumer)
-      (list (kernel-snapshot ctx)
+      (list (comparable (kernel-snapshot ctx))
             (map fiber-state (list provider consumer))
             (notes log)
             (fiber-uid consumer))))
-  (define plain (scenario 0))
-  (define shifted (scenario 7))
+  ;; Both runs declare the warm-up key; they differ in how many fiber and
+  ;; provider uids were handed out before the scenario proper.
+  (define plain (scenario 1))
+  (define shifted (scenario 8))
   (check-equal? (take plain 3) (take shifted 3))
   (check-false (equal? (fourth plain) (fourth shifted))))
 

@@ -11,7 +11,7 @@
          "lifecycle.rkt")
 
 (provide make-root-context context-custodian context-dispose! context-shutdown!
-         context-kill! ctx-logger hyphenate)
+         context-kill! ctx-logger call-contained hyphenate)
 
 ;; The root fiber is active, has uid 0, no plugin and an empty inject list. The kernel's
 ;; own listeners are installed outside the root fiber's effect list, so they survive
@@ -117,3 +117,21 @@
       (let ([l (make-logger name cordis-logger)])
         (hash-set! by-name name l)
         l)))
+
+;; Calls `thunk` and returns its values. An `exn:fail` it raises is logged at `error` through
+;; the logger of `ctx`'s fiber, under the topic `cordis` and with the exception as the event's
+;; data, and the result is then (void). Breaks and other raised values propagate.
+(define (call-contained ctx thunk #:label [label #f])
+  (with-handlers ([exn:fail?
+                   (lambda (e)
+                     (define f (context-fiber ctx))
+                     (hash-set! (kernel-logged (context-kernel ctx)) e #t)
+                     (define logger (ctx-logger ctx))
+                     (when (log-level? logger 'error 'cordis)
+                       (log-message logger 'error 'cordis
+                                    (if label
+                                        (format "~a: ~a: ~a" (fiber-name f) label (exn-message e))
+                                        (format "~a: ~a" (fiber-name f) (exn-message e)))
+                                    e #t))
+                     (void))])
+    (thunk)))

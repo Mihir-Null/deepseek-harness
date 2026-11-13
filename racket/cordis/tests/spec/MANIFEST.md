@@ -2,9 +2,11 @@
 
 This directory holds an independent black-box test suite for the `cordis` kernel package. It was written from the interface contract ([docs/racket/contracts/cordis-kernel.md](../../../../docs/racket/contracts/cordis-kernel.md)), the vendored TypeScript kernel (`vendor/cordis/src`), the kernel reconnaissance note ([docs/racket/recon/01-cordis-core.md](../../../../docs/racket/recon/01-cordis-core.md)) and the paper digest ([docs/racket/recon/19-paper-digest.md](../../../../docs/racket/recon/19-paper-digest.md)), without reading the implementation. It uses only the public modules `cordis`, `cordis/task`, `cordis/plugin` and `cordis/testing`.
 
-Run it with `raco test racket/cordis/tests/spec`. The suite has 207 test cases in nine files; `support.rkt` holds shared helpers and has no test case.
+Run it with `raco make racket/cordis/tests/spec/*.rkt` followed by `raco test racket/cordis/tests/spec`. The suite has 215 test cases in nine files; `support.rkt` holds shared helpers and has no test case.
 
-The suite was written before the implementation existed and had not been run when this manifest was written. Each file was checked to read as well-formed syntax and to expand without unbound identifiers against a compile-only stand-in that exports the names of the contract.
+The suite was written without running it against the implementation. Each file was checked to read as well-formed syntax and to compile without unbound identifiers against a compile-only stand-in that exports the names of contract sections 2 to 8 and 10 and nothing else.
+
+The suite follows the contract as of its section 12 addenda: cooperative breaks and `task-check-break` (addendum 1), `ctx-dispatch-callbacks` (addendum 2), inheritance through fibers (addendum 3) and `call-contained` (addendum 4).
 
 ## How the suite sequences and bounds its tests
 
@@ -12,7 +14,8 @@ The suite was written before the implementation existed and had not been run whe
 - Every wait is bounded. Kernel tests run inside `with-root`, which is `call-with-root-context` with `#:timeout 30`; task tests wait with `sync/timeout`. A timeout is a failure bound only.
 - A check that runs inside a plugin body, a listener or an inverse would be swallowed by kernel containment, so those places record observations and the test body checks the record.
 - A TypeScript call that returns a promise (`update`, `restart`, `dispose`, a disposer with an asynchronous inverse) blocks its caller in the Racket contract. A test that needs such a call in flight runs it in its own task.
-- Names that the contract mentions only in prose (`current-baton-warn-ms`, `current-mixin-resolver`, `default-merge`, `prop:config-schema`, `plugin-info`) are looked up with `dynamic-require`, so that a missing export fails one test case instead of one file.
+- Names that the contract mentions only in prose (`current-baton-warn-ms`, `current-mixin-resolver`, `default-merge`, `raise-validation-error`, `plugin-info`) and names that section 12 added after the first implementation started (`task-check-break`, `ctx-dispatch-callbacks`, `call-contained`) are looked up with `dynamic-require`, so that a missing export fails one test case instead of one file.
+- A task that a test starts from a plugin body, an effect thunk or a listener, and that must outlive the unload it waits for, is spawned through `make-spawner` under the custodian of the test body. Contract section 2 rule 9 and ADR 0004 put such a task under the activation custodian of the fiber whose code is running, and the unload shuts that custodian down.
 
 ## Property tests and the seed
 
@@ -24,11 +27,12 @@ Laws 21 and 36 to 39 run over random acyclic graphs of four to six plugin specs 
 
 | Requirement | File |
 |---|---|
-| Contract section 2, rules 1 to 11 | `task-spec-test.rkt` |
+| Contract section 2, rules 1 to 11, and section 12 addendum 1 | `task-spec-test.rkt` |
 | Contract section 4, effect results and rules 1 to 10 | `effect-spec-test.rkt` |
 | Contract section 5, every bullet and `ctx-ref` steps 1 to 4 | `service-spec-test.rkt` |
 | Contract section 6, rules 1 to 9 and config schemas | `fiber-spec-test.rkt` |
-| Contract section 7, every bullet | `events-spec-test.rkt` |
+| Contract section 7, every bullet, and section 12 addenda 2 and 4 | `events-spec-test.rkt` |
+| Contract section 3, root context and thread rules, and section 12 addendum 3 (not required) | `fiber-spec-test.rkt` |
 | TypeScript spec cases 1 to 23 | `lifecycle-spec-test.rkt` (1 to 3, 5 to 7, 14 to 19, 21 to 23), `service-spec-test.rkt` (4), `events-spec-test.rkt` (8), `effect-spec-test.rkt` (9 to 13) |
 | Supplementary cases S1 to S30 | named in the test case titles and sources below |
 | Laws 1 to 17 and 22 to 35 | `laws-spec-test.rkt`, except laws 2, 3, 6 and 9 in `effect-spec-test.rkt` |
@@ -39,7 +43,7 @@ In the tables below, "contract N" is a section of the kernel contract, "recon 01
 
 ## Test cases and their sources
 
-### `task-spec-test.rkt` (27 cases)
+### `task-spec-test.rkt` (29 cases)
 
 | Test case | Source |
 |---|---|
@@ -52,7 +56,9 @@ In the tables below, "contract N" is a section of the kernel contract, "recon 01
 | task rule 3: await returns task results and evt sync results | contract 2 rule 3 (task and evt cases; the fiber case is in fiber-spec-test.rkt) |
 | task rule 3: await releases the baton and returns holding it | contract 2 rule 3, "while waiting the baton is released" and "returns only after the baton is reacquired" |
 | task rule 4: a break during await is raised from await under the baton | contract 2 rule 4, first sentence |
-| task rule 4: a break while the task runs is raised where breaks are enabled | contract 2 rule 4, second sentence; ADR 0002 ("cancels it even in a CPU loop") |
+| task rule 4: a break while the task runs stays pending until the next release point | contract 2 rule 4, "Breaks are disabled while a task holds the baton" and "stays pending and is raised at its next release point"; contract 12 addendum 1 |
+| task rule 4: task-check-break raises a pending break and never releases the baton | contract 2, signature of task-check-break; rule 4, last sentence; rule 1 (not a release point); contract 12 addendum 1 |
+| task rule 4: a task without a release point is stopped by task-kill! only | contract 2 rule 4, "A task that never reaches a release point can only be stopped with task-kill!" |
 | task rule 5: await outside a task is plain sync | contract 2 rule 5 |
 | task rule 5: await outside a task does not wait for the baton | contract 2 rule 5, "it never touches the baton" |
 | task rule 6: blocking runs outside the baton and propagates values and exceptions | contract 2 rule 6, first sentence |
@@ -146,7 +152,7 @@ In the tables below, "contract N" is a section of the kernel contract, "recon 01
 | case 4: own isolated provision versus committed injection | scripts/cordis-core-lifecycle.spec.ts "separates own isolated provisions from the committed injection" (recon case 4) |
 | S21: an effect registered through a caller's handle belongs to the caller | recon 01 S21 and "Use site and definition site" items 4 and 5, in the form of ADR 0003 |
 
-### `fiber-spec-test.rkt` (35 cases)
+### `fiber-spec-test.rkt` (39 cases)
 
 | Test case | Source |
 |---|---|
@@ -180,11 +186,15 @@ In the tables below, "contract N" is a section of the kernel contract, "recon 01
 | fiber/config: a schema procedure validates; defaults reach the body, raw stays raw | contract 6, "Config schemas" (procedure form); recon 01 S24 |
 | fiber/config: an invalid initial config fails the fiber with the validation error | contract 6, "Config schemas", exn:fail:cordis:validation and its message format; fiber.ts ValidationError; recon 01 S24 |
 | fiber/config: an invalid update of a loaded fiber raises and changes nothing | contract 6 rule 7, "validates the candidate ... when the fiber is loaded"; fiber.ts update step 2; recon 01 S24 |
-| fiber/config: a value with prop:config-schema validates through its procedure | contract 6, "Config schemas", prop:config-schema |
+| fiber/config: a struct with prop:procedure is a schema | contract 6, "Config schemas", "any value applicable to one argument (a procedure, or a struct with prop:procedure ...)" |
+| fiber/config: what a schema raises is recorded and propagated unchanged | contract 6, "Config schemas", "Whatever it raises propagates unchanged and is what the fiber records as its error" |
+| fiber/config: raise-validation-error builds the Cordis ValidationError text | contract 6, "Config schemas", message format and `(raise-validation-error issues)`; fiber.ts ValidationError; recon 01 Formats |
 | fiber/config: internal/config listeners wrap validation for every fiber | contract 6 rule 3, "validate the config through the 'internal/config waterfall"; events.ts kernel listener; recon 01 S13 |
 | S20: a provider restart unloads dependents first and reloads them after | recon 01 S20; "Dependency tracking" consequences (provider restart) |
 | S28: disposing the root unloads everything and leaves a working root | recon 01 S28, "Root fiber" (dispose is restart); contract 3, context-dispose! |
 | S13: an update resolves the config for the candidate and again for the activation | recon 01 S13, "double resolution during an update"; fiber.ts update (candidate resolution) and _execute (activation resolution) |
+| fiber/context: a fiber's context inherits meta, realms and intercept layers | contract 12 addendum 3 |
+| context/threads: kernel operations may be called from a plain thread | contract 3, "Every public kernel operation that mutates state may be called from any thread"; contract 2 rule 5 (await of a fiber outside a task) and rule 7 |
 
 ### `lifecycle-spec-test.rkt` (18 cases)
 
@@ -209,7 +219,7 @@ In the tables below, "contract N" is a section of the kernel contract, "recon 01
 | case 22: an update reaches the body and publishes raw and effective config | scripts/cordis-config-access.spec.ts "publishes updates through registry wrappers to the canonical fiber" (recon case 22) |
 | case 23: a pending fiber retains a raw update until its injection arrives | scripts/cordis-config-access.spec.ts "retains a pending raw update until its injection is available" (recon case 23) |
 
-### `events-spec-test.rkt` (23 cases)
+### `events-spec-test.rkt` (25 cases)
 
 | Test case | Source |
 |---|---|
@@ -236,6 +246,8 @@ In the tables below, "contract N" is a section of the kernel contract, "recon 01
 | events/internal-listener: a bailed result replaces the registration | contract 7, "It first offers (ctx name listener options) to 'internal/listener through bail ... a bailed result is returned instead of registering"; events.ts on |
 | events/dispatch: ctx-dispatch runs any mode by name | contract 7, signature of ctx-dispatch |
 | events/serial: listeners may await and still run one after another | contract 7, serial bullet, "In Racket both may await" |
+| events/dispatch-callbacks: resolves the listeners of a dispatch without calling them | contract 12 addendum 2, ctx-dispatch-callbacks; events.ts dispatch |
+| events/call-contained: an exn:fail is logged and contained; other raises propagate | contract 12 addendum 4, call-contained |
 
 ### `laws-spec-test.rkt` (28 cases)
 
@@ -290,6 +302,7 @@ In the tables below, "contract N" is a section of the kernel contract, "recon 01
 | plugin/define-plugin: defines a plugin value with its declaration | contract 9, "Defines id as a plugin?"; ADR 0005 |
 | plugin/define-plugin: plugin-info lists required and optional injections | contract 9, plugin-info bullet |
 | plugin/define-plugin: required keys are handles, optional keys read through ctx-get | contract 9, define-plugin bullet on required and `#:optional` keys; ADR 0003 |
+
 ## Skipped cases
 
 Each entry names what was not ported and why.
@@ -313,6 +326,8 @@ Each entry names what was not ported and why.
 | Contract section 2 rule 2, resume order of two tasks whose events become ready independently | The order in which two unrelated events become ready cannot be fixed without wall-clock timing. The deterministic part (a resuming task queues behind tasks already waiting) is tested. |
 | Digest law 14, "a repeated notification causes neither" | The public API has no notify operation (`ctx-notify!` is in `cordis/private/loader-support`). The test uses an in-place `ctx-set!` and changes at undeclared keys. |
 | Recon quirk 12, mixin members need the access rights of their source | The contract does not say through which read a mixed-in name resolves. |
+| Contract section 7, `'internal/set` waterfall | The contract lists the event and names no operation that dispatches it. In TypeScript only a `Proxy` property write does; `ctx.set()` calls `reflect.set` directly. |
+| Contract section 3, loader support (`context-derive/rebindable`, `context-rebind!`, `ctx-notify!`) | These live in `cordis/private/loader-support`, which is not one of the public modules this suite may use. |
 
 ## Where the suite follows the contract over the TypeScript
 
@@ -331,11 +346,15 @@ A failure in one of these places may be a difference of reading, not a kernel de
 
 1. Recon case 15 adds an injection from an `'internal/plugin` observer. The contract names no mutator for a fiber's inject table, so the port writes to the table that `fiber-inject` returns and fails with a message that says so when that table is immutable.
 2. The grammar of `maybe-label` in the `effect` form is not given; only the default label (`file:line:col`) is tested.
-3. The signature of an accessor's setter and the arity of a `#:merge` procedure are not given; neither is called with a procedure of the suite's own.
-4. `kernel-snapshot` is assumed to contain no uid and to be `equal?` for two roots that ran the same scenario. The schedule tests compare it after sorting every list, because creation order differs between schedules.
-5. `exn:fail:cordis:validation` is raised by the schema procedure in the tests, with the message already in the contract's format; the contract does not say whether the kernel or the schema builds the message.
+3. The signature of an accessor's setter is not given, so no test passes one. `default-merge` is passed as `#:merge`; no test passes a merge procedure of its own, because the contract does not give its arity.
+4. `kernel-snapshot` is assumed to contain no uid, and to be `equal?` before and after a mount followed by a dispose on one root. Two roots are compared through `comparable` (in `support.rkt`), which sorts hash entries and lists and replaces symbols by their names, because creation order differs between schedules and realm symbols are uninterned.
+5. A schema raises `exn:fail:cordis:validation` itself, either through the struct constructor with a message already in the contract's format or through `raise-validation-error`. A path is a list of symbols. The line of an issue with an empty path is checked only up to its message, because the contract does not say whether `(at ...)` is omitted.
 6. The contract does not say that `current-scheduler` is set in kernel-created tasks. Code of the suite that runs in a plugin body or a listener passes `#:scheduler (context-scheduler ctx)` to `spawn-task`.
 7. `fiber-committed` of an active fiber without injections is expected to be an empty hash, as `committed = {}` is in TypeScript.
 8. `ctx-dispatch` is called with the mode as a symbol (`'emit`, `'parallel`, `'serial`, `'bail`, `'waterfall`). The mode in an `'internal/dispatch` payload is compared after `(format "~a" mode)`, so a symbol and a string both pass.
 9. An event name that is an uninterned symbol stands for a JavaScript symbol event name (recon case 8).
 10. An `'unloading` parent rejects `ctx-plugin` through section 4 rule 1, because the fiber is an effect of its parent; cases 18 and 19 rely on `ctx-plugin` skipping dependency resolution when the new fiber was disposed, or its parent began unloading, during publication (`fiber.ts` constructor).
+11. A record returned by `capture-log` is assumed to be the vector a Racket log receiver produces: level, message, data, topic. Kernel error logs are captured with `#:topic 'cordis`; the `call-contained` test uses its own receiver for every topic under `cordis-logger`, because addendum 4 says "on `ctx`'s logger" and leaves the topic open.
+12. `ctx-dispatch-callbacks` takes the mode as a symbol, like `ctx-dispatch`, and a returned procedure returns the listener's result, as a bound callback does in `events.ts`.
+13. `call-with-root-context` is assumed to run its procedure in a task whose custodian outlives a restart of the root fiber, and to re-raise what the procedure raises. Cases 9, 11 and 13 and S28 restart or dispose the root from that task.
+14. The rule 11 test holds the baton with `sleep` for 50 ms against a 1 ms threshold. The rule is about elapsed time between two release points, so this one outcome rests on a clock by definition; the test waits on events and has no other dependence on timing.

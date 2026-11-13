@@ -346,10 +346,16 @@
 (define (fiber-idle-evt f)
   (guard-evt
    (lambda ()
-     (define i (fiber-inertia f))
-     (if (and i (not (task-done? i)))
-         (replace-evt i (lambda (_) (fiber-idle-evt f)))
-         (wrap-evt always-evt (lambda (_) f))))))
+     (let loop ()
+       (define i (fiber-inertia f))
+       (cond
+         [(not i) (wrap-evt always-evt (lambda (_) f))]
+         [(not (task-done? i)) (replace-evt i (lambda (_) (fiber-idle-evt f)))]
+         ;; A transition names its successor before it ends, so a finished task that is
+         ;; still in the field was killed and nothing follows it. A thread that does not
+         ;; hold the baton may have read the field just before the successor was stored.
+         [(eq? (fiber-inertia f) i) (wrap-evt always-evt (lambda (_) f))]
+         [else (loop)])))))
 
 ;; Waits until no transition is in flight. A call from the fiber's own transition task
 ;; returns at once, because waiting there could never finish.

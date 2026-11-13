@@ -20,8 +20,10 @@
          make-gate gate-open! gate-wait
          make-recorder note! notes
          settle settle-all busy? yield-times yield-until
+         make-spawner
          raises?
          labels-of
+         comparable
          optional-binding
          unset?)
 
@@ -130,6 +132,19 @@
       (for-each settle busy)
       (loop (add1 rounds)))))
 
+;; Returns a procedure that spawns a thunk as a task on `ctx`'s scheduler under
+;; the custodian that is current when `make-spawner` is called, which is the
+;; test body's. A task spawned from a plugin body, an effect thunk, an inverse
+;; or a listener otherwise belongs to the custodian of the fiber whose code is
+;; running (contract 2 rule 9, ADR 0004) and is killed when that fiber unloads,
+;; which a task that waits for that unload must survive.
+(define (make-spawner ctx)
+  (define cust (current-custodian))
+  (define sched (context-scheduler ctx))
+  (lambda (thunk)
+    (parameterize ([current-custodian cust])
+      (spawn-task thunk #:scheduler sched))))
+
 ;; Predicate for check-exn: exception kind and message.
 (define ((raises? pred rx) e)
   (and (pred e) (regexp-match? rx (exn-message e))))
@@ -138,7 +153,24 @@
 (define (labels-of f)
   (map disposer-label (fiber-effects f)))
 
-;; A binding that the contract names only in prose. #f when the module does
+;; A form of a kernel-snapshot, or of any nested value, for comparison between
+;; two roots or two schedules. Hash entries and lists are sorted and symbols
+;; are replaced by their names, so that neither creation order nor the
+;; identity of uninterned realm symbols decides the comparison.
+(define (comparable v)
+  (define (repr x) (format "~s" x))
+  (cond [(hash? v)
+         (sort (for/list ([(k x) (in-hash v)]) (cons (repr k) (comparable x)))
+               string<?
+               #:key repr)]
+        [(list? v) (sort (map comparable v) string<? #:key repr)]
+        [(pair? v) (cons (comparable (car v)) (comparable (cdr v)))]
+        [(vector? v) (comparable (vector->list v))]
+        [(symbol? v) (symbol->string v)]
+        [else v]))
+
+;; A binding that the contract names only in prose, or added after the first
+;; implementation started (contract 12). #f when the module does
 ;; not export it, so that one missing name fails one test case, not a file.
 (define (optional-binding mod name)
   (dynamic-require mod name (lambda () #f)))

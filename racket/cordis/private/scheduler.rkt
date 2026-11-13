@@ -11,7 +11,17 @@
 ;;   a waiter may be queued on its behalf by the task that completes what it waits for;
 ;; - every wait reacquires the baton before it returns or raises;
 ;; - a task's waiter list and a latch's waiter list are touched only by baton holders.
+;;
+;; Breaks are cooperative. A task's thunk runs with breaks disabled, and a break is raised
+;; only at a release point, after the baton is reacquired. A release point accepts a break
+;; when the code that reaches it has not masked breaks itself: its break-enabled cell is
+;; still the one the task started with, or it enabled breaks explicitly. Code under
+;; `parameterize-break #f`, an exception handler or a `dynamic-wind` pre or post thunk
+;; therefore waits without being interrupted, as it would on a plain thread. The cell is
+;; read through `break-enabled-key` of '#%paramz, the key `parameterize-break` itself uses;
+;; tests/task-test.rkt pins the behaviour this depends on.
 (require racket/list
+         (only-in '#%paramz break-enabled-key)
          "errors.rkt"
          "log.rkt")
 
@@ -20,7 +30,8 @@
          spawn-task task? task-name task-scheduler task-done? task-result task-thread
          task-cancel! task-kill! task-wait task-failure task-observe!
          current-task in-task? own-break?
-         await await/timeout await-all yield-task task-sleep blocking call-in-kernel
+         await await/timeout await-all yield-task task-check-break task-sleep blocking
+         call-in-kernel
          prop:awaitable awaitable? (struct-out awaiter)
          make-latch latch? latch-open! latch-open? latch-wait)
 
@@ -45,6 +56,19 @@
 ;; True for a break that was delivered to the thread that sees it.
 (define (own-break? e)
   (and (exn:break? e) (not (hash-ref stored-breaks e #f))))
+
+;; The thread cell that holds the break-enabled state of the current continuation.
+(define (current-break-cell)
+  (continuation-mark-set-first #f break-enabled-key))
+
+;; True when a release point reached now by task `me` accepts a break.
+(define (breakable? me)
+  (or (break-enabled)
+      (eq? (current-break-cell) (task-break-cell me))))
+
+;; Raises a break that is pending for the current thread.
+(define (raise-pending-break)
+  (parameterize-break #t (void)))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Awaitables
@@ -185,8 +209,10 @@
 
 ;; outcome : #f while running, (cons 'values list) or (cons 'raise value) once finished.
 ;; `custodian` is the spawner's current custodian; it manages the task's thread.
+;; `break-cell` is the break-enabled cell the thunk starts with; see `breakable?`.
 (struct task (name scheduler grant done custodian
-                   [thread #:mutable] [outcome #:mutable] [observed? #:mutable])
+                   [thread #:mutable] [outcome #:mutable] [observed? #:mutable]
+                   [break-cell #:mutable])
   #:property prop:evt
   (lambda (t) (wrap-evt (thread-dead-evt (task-thread t)) (lambda (_) t)))
   #:property prop:awaitable
@@ -205,10 +231,9 @@
   (unless (scheduler-alive? s)
     (raise-cordis "spawn-task: scheduler ~a has been shut down" (scheduler-name s)))
   (define t (task (or name (object-name thunk) 'task) s (make-semaphore 0)
-                  (completion #f '()) (current-custodian) #f #f #f))
+                  (completion #f '()) (current-custodian) #f #f #f #f))
   ;; The request is queued here, before this procedure returns, so tasks start in spawn
-  ;; order. Breaks stay off until the thunk runs so that the new thread cannot be
-  ;; interrupted before it owns the baton.
+  ;; order. The new thread starts with breaks off and keeps them off.
   (parameterize-break #f
     (define th
       (parameterize ([current-scheduler s])
@@ -224,7 +249,10 @@
   (wait-grant s t)
   (define outcome
     (with-handlers ([(lambda (e) #t) (lambda (e) (cons 'raise e))])
-      (call-with-values (lambda () (parameterize-break #t (thunk)))
+      (call-with-values (lambda ()
+                          (parameterize-break #f
+                            (set-task-break-cell! t (current-break-cell))
+                            (thunk)))
                         (lambda vs (cons 'values vs)))))
   (set-task-outcome! t outcome)
   (when (eq? (car outcome) 'raise)
@@ -333,11 +361,12 @@
 ;; Waits for completion `c` or for `fallback` to become ready. The caller holds the baton
 ;; of `me`'s scheduler and holds it again on return. `fallback` must become ready whenever
 ;; `c` is marked done by a thread that does not hold the baton, or will never be marked.
+;; A break is accepted while waiting when `breakable?` holds on entry.
 (define (baton-wait me c fallback)
   (define s (task-scheduler me))
   (define r (make-request me))
   (set-completion-waiters! c (cons r (completion-waiters c)))
-  (define breaks? (break-enabled))
+  (define breaks? (breakable? me))
   (define broken
     (parameterize-break #f
       (release! s me)
@@ -353,10 +382,11 @@
       (and (exn? outcome) outcome)))
   (when broken (raise broken)))
 
-;; `sync` on `evt` with the baton released; returns the synchronization result.
+;; `sync` on `evt` with the baton released; returns the synchronization result. A break is
+;; accepted while waiting when `breakable?` holds on entry.
 (define (baton-sync me evt)
   (define s (task-scheduler me))
-  (define breaks? (break-enabled))
+  (define breaks? (breakable? me))
   (define outcome
     (parameterize-break #f
       (release! s me)
@@ -370,9 +400,20 @@
       (raise (cdr outcome))
       (apply values (cdr outcome))))
 
+;; Raises a break that is pending for the current thread, unless the calling code masks
+;; breaks. A cancellation point that neither waits nor releases the baton.
+(define (task-check-break)
+  (define me (current-task))
+  (when (if me (breakable? me) (break-enabled))
+    (raise-pending-break))
+  (void))
+
+;; Every `await` is a cancellation point, also when what it awaits has already settled.
 (define (await x)
   (cond
-    [(awaitable? x) ((awaiter-await (awaitable-ref x)) x)]
+    [(awaitable? x)
+     (task-check-break)
+     ((awaiter-await (awaitable-ref x)) x)]
     [(evt? x)
      (define me (current-task))
      (if me (baton-sync me x) (sync x))]
@@ -385,6 +426,7 @@
   (cond
     [(awaitable? x)
      (define a (awaitable-ref x))
+     (task-check-break)
      (let loop ()
        (cond
          [((awaiter-ready? a) x) ((awaiter-await a) x)]
@@ -406,6 +448,7 @@
 ;; of values). Every element is awaited; the first failure in list order is raised after
 ;; all have settled. A break of the calling task is raised at once.
 (define (await-all xs)
+  (task-check-break)
   (define outcomes
     (for/list ([x (in-list xs)])
       (cond
@@ -424,15 +467,19 @@
     (define vs (cdr o))
     (if (and (pair? vs) (null? (cdr vs))) (car vs) vs)))
 
+;; The break check comes after the baton is back: a break that arrived while the task was
+;; queued is raised under the baton, like one that arrives during `await`.
 (define (yield-task)
   (define me (current-task))
   (cond
     [me
      (define s (task-scheduler me))
+     (define breaks? (breakable? me))
      (parameterize-break #f
        (if (send! s (cons 'yield (make-request me)))
            (wait-grant s me)
-           (block-forever)))]
+           (block-forever)))
+     (when breaks? (raise-pending-break))]
     [else (sleep 0)])
   (void))
 

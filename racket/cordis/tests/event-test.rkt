@@ -251,6 +251,76 @@
                   (list '(emit e (0 x)) '(bail b ()) '(serial s (1)) '(parallel p (2))
                         (list 'waterfall 'w (list 3 inner))))))
 
+;; ---------------------------------------------------------------------------------------
+;; ctx-dispatch-callbacks (contract section 12, item 2)
+
+(test-case "dispatch-callbacks: the listeners of a dispatch, in order, without calling them"
+  (define-values (note notes) (make-recorder))
+  (with-root-context (ctx)
+    (define scope-a (context-extend ctx (hasheq 'scope 'a)))
+    (define scope-b (context-extend ctx (hasheq 'scope 'b)))
+    (ctx-on scope-a 'event (lambda (x) (note (list 'a x (eq? (current-context) scope-a))) 'from-a))
+    (ctx-on scope-b 'event (lambda (x) (note (list 'b x)) 'from-b))
+    (ctx-on scope-b 'event (lambda (x) (note (list 'global x)) 'from-global) #:global? #t)
+    (ctx-on scope-b 'event (lambda (x) (note (list 'first x)) 'from-first) #:prepend? #t)
+    (define (in-a? c) (eq? (context-meta c 'scope) 'a))
+    (define all (ctx-dispatch-callbacks ctx 'emit 'event '(1)))
+    (check-equal? (length all) 4)
+    (check-true (andmap procedure? all))
+    ;; resolving calls nobody
+    (check-equal? (notes) '())
+    (check-equal? (map (lambda (callback) (callback 1)) all)
+                  '(from-first from-a from-b from-global))
+    (check-equal? (notes) '((first 1) (a 1 #t) (b 1) (global 1)))
+    ;; the filter applies to registering contexts; global listeners bypass it
+    (define scoped (ctx-dispatch-callbacks ctx 'serial "event" '(2) #:filter in-a?))
+    (check-equal? (map (lambda (callback) (callback 2)) scoped) '(from-a from-global))
+    (check-equal? (ctx-dispatch-callbacks ctx 'emit 'nobody '()) '())
+    (check-exn exn:fail:contract?
+               (lambda () (ctx-dispatch-callbacks ctx 'broadcast 'event '())))))
+
+(test-case "dispatch-callbacks: internal/dispatch is emitted as for a real dispatch"
+  (define-values (note notes) (make-recorder))
+  (with-root-context (ctx)
+    (ctx-on ctx 'internal/dispatch (lambda (mode name args) (note (list mode name args))))
+    (ctx-on ctx 'event void)
+    (ctx-dispatch-callbacks ctx 'bail 'event '(1 2))
+    (ctx-dispatch-callbacks ctx 'emit 'internal/status '())
+    (check-equal? (notes) '((bail event (1 2))))))
+
+(test-case "dispatch-callbacks: the result is the audience at the time of the call"
+  (define-values (note notes) (make-recorder))
+  (with-root-context (ctx)
+    (define d (ctx-on ctx 'event (lambda () (note 'early))))
+    (define callbacks (ctx-dispatch-callbacks ctx 'emit 'event '()))
+    (ctx-on ctx 'event (lambda () (note 'late)))
+    (d)
+    (for ([callback (in-list callbacks)]) (callback))
+    (check-equal? (notes) '(early))))
+
+(test-case "dispatch-callbacks: each listener can be contained on its own"
+  (define-values (note notes) (make-recorder))
+  (with-root-context (ctx)
+    (ctx-on ctx 'event (lambda (x) (note (list 'one x))))
+    (ctx-on ctx 'event (lambda (x) (raise-user-error "listener two failed")))
+    (ctx-on ctx 'event (lambda (x) (note (list 'three x))))
+    (define-values (_ events)
+      (capture-log
+       (lambda ()
+         (for ([callback (in-list (ctx-dispatch-callbacks ctx 'emit 'event '(7)))])
+           (call-contained ctx (lambda () (callback 7)) #:label "event listener")))))
+    (check-equal? (notes) '((one 7) (three 7)))
+    (check-equal? (length events) 1)
+    (check-regexp-match #rx"event listener: listener two failed" (vector-ref (car events) 1))))
+
+(test-case "dispatch-callbacks: resolving and calling work from a thread that is not a task"
+  (define root (make-root-context))
+  (define s (context-scheduler root))
+  (ctx-on root 'event (lambda (x) (list x (in-task? s))))
+  (define callbacks (ctx-dispatch-callbacks root 'emit 'event '(1)))
+  (check-equal? ((car callbacks) 1) '(1 #t))
+  (context-shutdown! root))
+
 (test-case "dispatch works from a thread that is not a task"
   (define-values (note notes) (make-recorder))
   (define root (make-root-context))
