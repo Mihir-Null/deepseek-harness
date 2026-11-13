@@ -89,12 +89,19 @@
 
 ;; What reading a builtin method without calling it yields: a function that cannot be called,
 ;; because a call would have lost the object it was read from.
-(struct detached-method (owner name)
+(struct detached (owner name)
   #:property prop:procedure
   (lambda (self . arguments)
     (raise-js-unsupported
      (format "call of ~a.prototype.~a detached from its object"
-             (detached-method-owner self) (detached-method-name self)))))
+             (detached-owner self) (detached-name self)))))
+
+;; One value per method, as JavaScript has one function object per prototype method, so that
+;; 'a'.trim === 'b'.trim holds. The table only ever grows to the number of builtin methods.
+(define detached-methods (make-hash))
+
+(define (detached-method owner name)
+  (hash-ref! detached-methods (cons owner name) (lambda () (detached owner name))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Strings
@@ -406,6 +413,16 @@
         (define split (- (string-length padded) digits))
         (string-append (substring padded 0 split) "." (substring padded split))])]))
 
+(define radix-digits "0123456789abcdefghijklmnopqrstuvwxyz")
+
+;; The digits of an exact integer in a radix from 2 to 36, lowercase.
+(define (integer->radix-string n radix)
+  (cond [(negative? n) (string-append "-" (integer->radix-string (- n) radix))]
+        [(< n radix) (string (string-ref radix-digits n))]
+        [else
+         (string-append (integer->radix-string (quotient n radix) radix)
+                        (string (string-ref radix-digits (remainder n radix))))]))
+
 (define (number-method name)
   (case name
     [("toFixed")
@@ -422,11 +439,11 @@
          (raise-js-error "RangeError" "toString() radix must be between 2 and 36"))
        (define value (normalize-number x))
        (cond [(= radix 10) (js->string value)]
-             [(exact-integer? value) (number->string value radix)]
+             [(exact-integer? value) (integer->radix-string value radix)]
              [(and (flonum? value) (or (not (fl= value value)) (fl= (flabs value) +inf.0)))
               (js->string value)]
              [(and (flonum? value) (fl= value (flfloor value)))
-              (number->string (fl->exact-integer value) radix)]
+              (integer->radix-string (fl->exact-integer value) radix)]
              [else
               (raise-js-unsupported "Number.prototype.toString of a fraction in a radix other than 10")]))]
     [("valueOf") (lambda (x arguments) (normalize-number x))]
@@ -588,7 +605,9 @@
        (list->string (for/list ([c (in-string body)] #:break (>= (digit-value c) radix)) c)))
      (cond [(string=? digits "") +nan.0]
            [else
-            (define magnitude (normalize-number (string->number digits radix)))
+            (define magnitude
+              (normalize-number
+               (for/fold ([n 0]) ([c (in-string digits)]) (+ (* n radix) (digit-value c)))))
             (if negative? (js-negate magnitude) magnitude)])]))
 
 (define parse-float-pattern

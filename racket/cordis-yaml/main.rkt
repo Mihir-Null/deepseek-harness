@@ -34,11 +34,12 @@
   ;; Every js-expr becomes the object {"__jsExpr": source}, dsh's form of an expression node.
   [yaml-value->jvalue (-> any/c any/c)]
   ;; Every object with a string "__jsExpr" member becomes a js-expr.
-  [jvalue->yaml-value (-> any/c any/c)]
-  [js-expr? predicate/c]
-  [make-js-expr (->* (string?) ((or/c srcloc? #f)) js-expr?)]
-  [js-expr-source (-> js-expr? string?)]
-  [js-expr-srcloc (-> js-expr? (or/c srcloc? #f))]))
+  [jvalue->yaml-value (-> any/c any/c)])
+ ;; Expression nodes; the same bindings as in `cordis-yaml/js-expr`.
+ js-expr?
+ make-js-expr
+ js-expr-source
+ js-expr-srcloc)
 
 ;; The text of `in` and the name to report: a port is read to its end and decoded as UTF-8
 ;; with U+FFFD for each invalid sequence, as Node's readFile(path, 'utf8') decodes.

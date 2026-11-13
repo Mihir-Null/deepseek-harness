@@ -265,11 +265,15 @@
   (with-scheduler (s)
     (check-false (in-task?))
     (define ready (make-semaphore 1))
-    (check-eq? (await (wrap-evt (semaphore-peek-evt ready) (lambda (_) 'synced))) 'synced)
+    (define (outside thunk) (call-bounded thunk))
+    (check-false (outside in-task?))
+    (check-eq? (outside (lambda ()
+                          (await (wrap-evt (semaphore-peek-evt ready) (lambda (_) 'synced)))))
+               'synced)
     (define t (spawn-task (lambda () 'from-task)))
-    (check-eq? (await t) 'from-task)
+    (check-eq? (outside (lambda () (await t))) 'from-task)
     (define failing (spawn-task (lambda () (raise-user-error "outside failure"))))
-    (check-exn #rx"outside failure" (lambda () (await failing)))))
+    (check-exn #rx"outside failure" (lambda () (outside (lambda () (await failing)))))))
 
 ;; source: contract 2 rule 5, "it never touches the baton"
 (test-case "task rule 5: await outside a task does not wait for the baton"
@@ -358,16 +362,22 @@
 ;; source: contract 2 rule 7
 (test-case "task rule 7: call-in-kernel spawns from a plain thread and calls directly in a task"
   (with-scheduler (s)
-    (define main (current-thread))
-    (check-equal? (call-with-values
+    ;; `call-bounded` makes each call from a plain thread and bounds the wait.
+    (check-equal? (call-bounded
                    (lambda ()
-                     (call-in-kernel (lambda ()
-                                       (values (in-task?) (eq? (current-thread) main)))))
-                   list)
+                     (define caller (current-thread))
+                     (call-with-values
+                      (lambda ()
+                        (call-in-kernel (lambda ()
+                                          (values (in-task?) (eq? (current-thread) caller)))))
+                      list)))
                   '(#t #f))
-    (check-equal? (call-in-kernel (lambda () 'by-keyword) #:scheduler s) 'by-keyword)
+    (check-equal? (call-bounded (lambda () (call-in-kernel (lambda () 'by-keyword) #:scheduler s)))
+                  'by-keyword)
     (check-exn #rx"kernel failure"
-               (lambda () (call-in-kernel (lambda () (raise-user-error "kernel failure")))))
+               (lambda ()
+                 (call-bounded
+                  (lambda () (call-in-kernel (lambda () (raise-user-error "kernel failure")))))))
     (check-true
      (run-task
       (lambda ()

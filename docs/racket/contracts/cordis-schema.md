@@ -11,7 +11,7 @@ Package `racket/cordis-schema/`, collection `cordis-schema`, `(define deps '("ba
 | `cordis-schema` (`main.rkt`) | everything in sections 2 to 12 |
 | `cordis-schema/volatile` | section 9 alone, for code that handles references without schemas |
 
-Internal modules live under `private/`.
+Internal modules live under `private/`: `api.rkt` (the functions with their contracts), `forms.rkt` (section 12), `schema.rkt` (the schema value and resolution), `build.rkt` (constructors and modifiers), `json.rkt` (section 11), `ops.rkt` (sections 8 and 10 and `schema-i18n`), `js.rkt` (JavaScript coercions).
 
 ## 2. Values and JavaScript correspondences
 
@@ -23,13 +23,13 @@ Internal modules live under `private/`.
 | number | real number (exact integer or flonum); arithmetic and number text follow doubles |
 | array | list |
 | plain object | `jobject`; a `hash` is accepted on input and read in `cordis-data` key order |
-| function | procedure (a schema is not a procedure for this purpose) |
+| function | procedure; a schema is one, as a Schemastery schema is a function |
 | `Volatile<T>` | `volatile?` reference (section 9) |
 | `Date` | `date*` in UTC (`racket/base`); any `date?` is accepted on input |
 | `RegExp` | `regexp?` or `byte-regexp?` value |
 | `ArrayBuffer` and views | `bytes?` |
 
-"Nullable" means `(void)` or `'null`. A result list may hold `(void)` where Schemastery leaves `undefined` in an array (an autofixed element, a callback result); a result jobject omits a key whose value would be `undefined`.
+"Nullable" means `(void)` or `'null`. A result list may hold `(void)` where Schemastery leaves `undefined` in an array (an autofixed element, a callback result); a result jobject omits a key whose value would be `undefined`. Such a key still counts as present where Schemastery tests `key in result`: neither `object` nor `intersect` fills it from the input or from a later member.
 
 ## 3. Schemas
 
@@ -128,19 +128,19 @@ Each resolver receives non-nullable data, except `lazy` (section 7.1). Messages 
 - `const`: accepts data `deep-equal?` (loose) to `value`; returns `value`.
 - `string`: a string; with `pattern`, it must match; `min` and `max` bound its length in UTF-16 units.
 - `number`: a real number within `min` and `max`; with a non-zero `step`, `data - (min or 0)` must be a multiple of `step`, computed as Schemastery does (in doubles, shifting decimal digits when `step` prints with a fraction).
-- `boolean`: a boolean. `function`: a procedure that is not a schema.
+- `boolean`: a boolean. `function`: a procedure.
 - `bitset`: a number is kept; a list of key strings is OR-ed into a 32-bit integer (unknown keys add nothing; a member that is not a string fails). Default `0`. The adapted input is the key list unless the value equals the default.
 - `is`: with `pred`, data that satisfies `pred`, like `z.is(Constructor)`. Without it, like `z.is('Name')`: data whose JavaScript-side constructor chain contains the name. The chain of a Racket value is: `String`, `Number`, `Boolean`, `Function` for those types; `Array` for a list; `Date` for a `date?`; `RegExp` for a regexp; `ArrayBuffer` for bytes; the names of a struct's visible struct types; and `Object` for every value.
 - `array`: a list; `min` and `max` bound its length (the minimum is skipped when `inner` has a non-nullable default); each element resolves as a property with its index. Default `'()`.
 - `dict`: an object; each key resolves through `key` (in strict mode a rejected key is skipped, otherwise the failure propagates), each value through `inner` as a property; the result maps resolved keys to values. Default the empty jobject.
 - `tuple`: a list; position `i` resolves through member `i` as a property; elements beyond the members are appended unvalidated unless strict. Default `'()`.
-- `object`: an object; fields resolve in schema order, each as a property; a field is stored when its value is not nullable or its key is present in the input; then, unless strict, input keys not yet in the result are appended in input order. Default the empty jobject.
+- `object`: an object; fields resolve in schema order, each as a property; a field is stored when its value is not nullable or its key is present in the input; then, unless strict, input keys not yet in the result are appended in input order. Default the empty jobject. An input key named like a member every JavaScript object inherits (`constructor`, `toString`, `toLocaleString`, `valueOf`, `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`, `__proto__`, `__defineGetter__`, `__defineSetter__`, `__lookupGetter__`, `__lookupSetter__`) is never appended, here and in `intersect`, because Schemastery's `key in result` is true for it.
 - `union`: the first member that resolves the data wins.
 - `intersect`: no members returns the data. Otherwise each member resolves the data in strict mode; nullable results are skipped; the first other result is the base; a later result of another JavaScript type, or an unequal primitive, fails; object results add the keys the base lacks (list results extend the base list). Unless strict, and when the data is an object, input keys the result lacks are appended.
 - `transform`: resolves `inner` in strict mode and returns `(callback result)`. Unless `preserve` is true, the callback is called a second time, on the adapted input, to produce the adapted value; this is Schemastery's behaviour and a callback must tolerate it. `#:source` is the JavaScript text of the callback for the JSON form.
-- `lazy`: `builder` runs on first use (resolution, `schema-inner`, serialization) and its result is cached in that schema value. The built schema's metadata is the lazy node's metadata overridden by its own.
-- `date`: `union` of `is "Date"` and a preserving transform of `string` with role `datetime` that parses the ECMAScript date-time format (`YYYY-MM-DD`, `YYYY-MM-DDTHH:mm[:ss[.sss]]` with `Z`, an offset, or local time) into a UTC `date*`.
-- `regexp`: `union` of `is "RegExp"` and a preserving transform of `string` with role `regexp` and extra `{"flag": flag}` that compiles the text, read as JavaScript regular-expression syntax, into a Racket regexp.
+- `lazy`: `builder` runs on first use (resolution, `schema-inner`, serialization) and its result is cached in that schema value. The built schema's metadata is the lazy node's metadata overridden by its own; when that leaves the built schema's metadata as it is, the lazy node stands for the very value the builder returned, so a recursive schema refers back to itself. A lazy schema resolves nullable data too, so a lazy field is built even when the input omits it.
+- `date`: `union` of `is "Date"` and a preserving transform of `string` with role `datetime` that parses the ECMAScript date-time format (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`, and a date with `THH:mm[:ss[.sss]]` followed by `Z`, an offset, or nothing for local time) into a UTC `date*`.
+- `regexp`: `union` of `is "RegExp"` and a preserving transform of `string` with role `regexp` and extra `{"flag": flag}` that compiles the text, read as JavaScript regular-expression syntax, into a Racket regexp for ordinary strings (it counts whole characters whatever the flags).
 - `array-buffer`: `union` of `is "ArrayBuffer"`, `is "SharedArrayBuffer"`, a preserving transform of `any` that accepts bytes, and, with an encoding, a preserving transform of `string` that decodes hex or base64 as Node's `Buffer.from` does.
 
 A "property" is Schemastery's `property()`: the child resolves with the key appended to the path; with `autofix?` a failure of any kind removes the key from the adapted input and yields the child's default (wrapped in a reference when the child is volatile).
@@ -183,7 +183,7 @@ Each returns a new schema; `value` flags default to `#t`.
 ```
 
 - A metadata key keeps the position of its first assignment; a value of `(void)` records the key as undefined (it is then absent from `schema-meta` and from the JSON form), as `.extra('default', undefined)` does.
-- `schema-pattern` takes the pattern as JavaScript regular-expression source, as it appears between the slashes in the TypeScript, and stores `{"source": ..., "flags": ...}` with the source as `RegExp.prototype.source` prints it and the flags in canonical order. The source is translated to a Racket `pregexp` for matching: character classes, anchors, quantifiers, groups (named groups included), lookaround, backreferences and the escapes `\d \w \s \b \t \n \r \f \v \0 \xHH \uHHHH \u{H} \cX` with the flags `i`, `m`, `s`, `y` are supported; `g`, `u`, `d`, `v` are accepted and have no effect on a single test. A source that cannot be translated raises `exn:fail:contract` from `schema-pattern`.
+- `schema-pattern` takes the pattern as JavaScript regular-expression source, as it appears between the slashes in the TypeScript, and stores `{"source": ..., "flags": ...}` with the source as `RegExp.prototype.source` prints it and the flags in canonical order. The source is translated to a Racket `pregexp` for matching: character classes, anchors, quantifiers, groups (named groups included), lookaround, backreferences and the escapes `\d \w \s \b \t \n \r \f \v \0 \xHH \uHHHH \cX`, with the flags `i`, `m`, `s`, `y`; `g` and `d` are accepted and have no effect on a single test. With `u` or `v`, `\u{H}` is a code point and `\p{...}` and `\P{...}` name a Unicode general category that Racket knows (`L`, `Lu`, `N`, ...), inside a class too; other property names are rejected. Without `u` or `v` a match counts UTF-16 code units, as in JavaScript: `^.$` does not match one character outside the Basic Multilingual Plane, and `^..$` does. A source or flags that JavaScript rejects, and a source that cannot be translated, raise `exn:fail:contract` from `schema-pattern`.
 - `schema-set` and `schema-push` return a new schema; Schemastery mutates in place. A recursive schema is written with `schema-lazy`.
 - `schema-i18n` follows Schemastery: `messages` maps a locale to a string or an object with `$description` or `$desc`, `$value` or `$inner`, `$key`, and per-field or per-index entries; descriptions become a locale object whose `""` entry is the previous plain description.
 - `schema-volatile` marks the node as parsed into a reference. Placement is checked when a schema is resolved (section 7.2).
@@ -209,7 +209,9 @@ For data `d`, schema `s`, options and a strict flag:
 5. Run the type's resolver. A type without one fails with `unsupported type "TYPE"`.
 6. If the resolver raises anything and `loose` is true, the result is the default.
 
-Results are deterministic and never alias mutable state: the same schema and data always give `equal?` results, except that every volatile field yields a fresh reference.
+Results never alias mutable state: the same schema and data give `equal?` results, except that every volatile field yields a fresh reference, and that a lazy schema is checked for volatile placement differently once it is built (7.2).
+
+A resolve nests at most 10000 properties deep; beyond that it raises `exn:fail` with `RangeError: Maximum call stack size exceeded`. A schema that contains itself with a default on the cycle would otherwise resolve without end, and JavaScript stops it the same way.
 
 ### 7.2 Volatile placement (`validateVolatileSchema`)
 
@@ -219,7 +221,7 @@ A volatile node is legal only on a path of object fields with no enclosing volat
 
 `exn-message` is the path prefix and the message. The prefix is `$` followed by `.KEY` for each key and `[N]` for each index, then a space; an empty path has no prefix: `$.root[1] expected string but got 1`, `$.a missing required value`, `expected object but got str`.
 
-`DATA` below is the JavaScript string of the value (`String(data)`): a string as is; a number as `js-number->string`; `true`, `false`, `null`, `undefined`; a list as its members joined with `,` (nullable members empty); an object as `[object Object]`; a procedure as `function NAME() { [native code] }`. `JSON` is `JSON.stringify(data)`.
+`DATA` below is the JavaScript string of the value (`String(data)`): a string as is; a number as `js-number->string`; `true`, `false`, `null`, `undefined`; a list as its members joined with `,` (nullable members empty); an object as `[object Object]`; a procedure as `function NAME() { [native code] }`; a schema as its type string. `JSON` is `JSON.stringify(data)`.
 
 | Type | Message |
 |---|---|
@@ -240,9 +242,11 @@ A volatile node is legal only on a path of object fields with no enclosing volat
 
 The maximum is checked before the minimum. A failing union member's own error is discarded; a failing intersect member's error propagates.
 
+A failure that is a `TypeError` or `RangeError` in JavaScript, not a `ValidationError`, raises an `exn:fail` that is not an `exn:fail:schema`, whose message starts with the JavaScript error name: an `intersect` whose members all gave nullable results while the input object has keys (`TypeError: Cannot use 'in' operator to search for 'KEY' in undefined`), a transform whose callback is not a procedure, `schema-simplify` of a value that is not a list by an `array` or `tuple` schema, and the depth bound of 7.1. `loose`, `autofix?` and union members treat it like any other failure.
+
 ## 8. Simplification (`schema.simplify`)
 
-`(schema-simplify s value)` removes what equals a default, for writing a config back. A reference is replaced by its contents first. A value `deep-equal?` to the schema's default gives `'null` (strict comparison for `dict`, loose otherwise). A nullable value is returned as is. `object`: each key of the value is simplified by its field schema and kept when the result is not nullable; keys without a field schema are dropped; a result equal to the default gives `'null`. `dict`: every key is kept with its simplified value. `array`, `tuple`: elements are simplified by `inner` or the member at the same index. `intersect`: the members' results are merged left to right. `union`: the first member that resolves the value simplifies it. Other types return the value.
+`(schema-simplify s value)` removes what equals a default, for writing a config back. A reference is replaced by its contents first. A value `deep-equal?` to the schema's default gives `'null` (strict comparison for `dict`, loose otherwise). A nullable value is returned as is. `object`: each key of the value is simplified by its field schema and kept when the result is not nullable; keys without a field schema are dropped; a result equal to the default gives `'null`. `dict`: every key is kept with its simplified value. `array`, `tuple`: elements are simplified by `inner` or the member at the same index. `intersect`: the members' results are merged left to right as `Object.assign` merges them (a list contributes its elements under their indexes). `union`: the first member that resolves the value and simplifies it without failing gives the result. Other types, `lazy` and `transform` included, return the value.
 
 `(z.object({ a: z.number().default(1), b: z.string() })).simplify({ a: 1, b: 'x', c: 2 })` is `{ b: 'x' }`.
 
@@ -268,7 +272,7 @@ The maximum is checked before the minimum. A failing union member's own error is
 (equal-except-volatile? previous next schema) -> boolean?
 ```
 
-Whether two raw configs differ at most in volatile fields. With `schema` not a `schema?` (no schema, or a validator of another kind) it is `(deep-equal? previous next #:strict? #t)`. Otherwise, at each node: a volatile schema node is equal whatever the values; a node that is not an `object` schema, or one already being compared further up (a recursive schema), compares strictly; for an object node a nullable side is replaced by the schema's default, and if either side is then not a jobject or hash the two compare strictly; otherwise every key of either side must be equal under its field schema, keys without one strictly. It never resolves, runs a callback or builds a lazy schema.
+Whether two raw configs differ at most in volatile fields. With `schema` not a `schema?` (no schema, or a validator of another kind) it is `(deep-equal? previous next #:strict? #t)`. Otherwise, at each node: a volatile schema node is equal whatever the values; a node that is not an `object` schema, or one already being compared further up (a recursive schema), compares strictly; for an object node a nullable side is replaced by the schema's default, and if either side is then not a record the two compare strictly; otherwise every key of either side must be equal under its field schema, keys without one strictly. A record is a jobject or hash without a `__jsExpr` key: an object with that key is dsh's serialized `!!js` expression node, and an edit of an expression is never a volatile-only change. It never resolves, runs a callback or builds a lazy schema, so a field whose schema is `lazy` compares strictly.
 
 ## 11. JSON form
 
@@ -283,7 +287,7 @@ Whether two raw configs differ at most in volatile fields. With `schema` not a `
 - `callback` is the `#:source` text when one was given, else the procedure's name; `preserve` appears only when it was passed; `constructor` is the name; values that JSON cannot hold are dropped from objects and written as `null` in arrays, and infinities as `null`;
 - uids are assigned by this function, not stored in schemas: the distinct schema values reachable from `s` are numbered from 0 in depth-first post-order (children before parents; `inner`, then the key schema, then members, then fields), so the root has the highest uid and `refs` lists nodes in increasing uid order. The same schema value always gets one node. Schemastery's uids come from a process-wide counter, so its numbers differ; the node contents do not.
 
-`jvalue->schema` accepts that envelope, a jobject or hash, and also a bare node whose children are inline nodes (`{"type":"object","dict":{"enabled":{"type":"boolean"}}}`). A node without `meta` gets empty metadata. Shared uids stay shared. A reference back to a node that is still being built (a schema that contains itself without a lazy node) becomes a lazy node. A string `callback` stays a string unless `revive : (-> string? (or/c procedure? #f))` returns a procedure for it; resolving a transform whose callback is not a procedure raises `exn:fail`. `resolvers` maps custom type names to resolvers (4.4). Malformed input (no `type`, an unknown uid) raises `exn:fail:contract`.
+`jvalue->schema` accepts that envelope, a jobject or hash, and also a bare node whose children are inline nodes (`{"type":"object","dict":{"enabled":{"type":"boolean"}}}`). A node without `meta` gets empty metadata. A node keeps the property order it was read with when it is written again (metadata it lacked goes last); properties this document does not name are dropped. Shared uids stay shared. The inner schema of a `lazy` node is read on first use. A reference back to a node that is still being built (a schema that contains itself without a lazy node) becomes a lazy node. A string `callback` stays a string unless `revive : (-> string? (or/c procedure? #f))` returns a procedure for it; resolving a transform whose callback is not a procedure raises `exn:fail`. Either way the text is kept and written again. `resolvers` maps custom type names (strings or symbols) to resolvers (4.4). Malformed input (a node without a string `type`, a `lazy` node without `inner`, a uid the table lacks, a reference that is neither a uid nor a node) raises `exn:fail:contract` from `jvalue->schema`.
 
 ## 12. Declaration forms
 
@@ -320,12 +324,14 @@ Whether two raw configs differ at most in volatile fields. With `schema` not a `
 
 Deliberate, each pinned by a test:
 
-- **No in-place mutation.** Schemastery rewrites its input object while resolving; here the rewritten input is the second value of `schema-resolve`. A union member that fails leaves no trace for later members, where Schemastery may already have rewritten part of the input (only observable with bitset fields, non-preserving transforms or key-renaming dicts inside failing union members).
+- **No in-place mutation.** Schemastery rewrites its input object while resolving; here the rewritten input is the second value of `schema-resolve`. Three effects of the rewriting are not reproduced. A union member that fails leaves no trace for later members, where Schemastery may already have rewritten part of the input (observable with bitset fields, non-preserving transforms, key-renaming dicts, and keys that `autofix?` deleted, inside failing union members); the same holds for the members `schema-simplify` tries. A `loose` schema whose resolver fails leaves the input as it was. A result that is the input value itself (from `any` or `ignore`) does not change when a later `intersect` member rewrites the input, and a default that `loose` returned does not change when an enclosing `intersect` merges into it.
+- **Undefined members.** A jobject omits a member that is `undefined` in Schemastery's result (section 2), so a transform callback and `schema-simplify` do not see the key.
 - **No metadata aliasing.** `schema-deprecated`, `schema-experimental` and `schema-i18n` do not change the schema they are applied to; in Schemastery the copy shares its metadata object with the original.
-- **`set` and `push` are functional**, and a schema cannot contain itself; `schema-lazy` expresses recursion. A modifier applied to a lazy schema always reaches the built schema; Schemastery ignores one applied after the lazy node was first resolved.
+- **`set` and `push` are functional**, and a schema cannot contain itself; `schema-lazy` expresses recursion. A modifier applied to a lazy schema always reaches the built schema, in resolution and in the JSON form; Schemastery ignores one applied after the lazy node was first resolved, and its JSON form merges the metadata of the node `lazy()` returned, not of the modified copy.
 - **uids** are assigned at serialization (section 11).
 - **No global `Schema.extend` table**; the resolver travels with the schema (4.4).
-- **Functions** print as `function NAME() { [native code] }` in messages, and a transform callback serializes as its `#:source` or its name, because a procedure has no source text.
+- **Functions** print as `function NAME() { [native code] }` in messages, and a transform callback serializes as its `#:source` or its name, because a procedure has no source text. The callbacks of `schema-date`, `schema-regexp` and `schema-array-buffer` carry the text of `vendor/schemastery/src/index.ts`; what Node prints for them depends on how that file was compiled. A callback read from JSON keeps its text when the schema is written again, where Schemastery drops a revived one.
+- **Type string of a const** whose value is an object or a list is `[object Object]` or the joined elements; `String(schema)` throws for these in JavaScript, and they appear this way inside a union's message there.
 - **`date`, `regexp`, `pattern`** accept the documented subset of what `new Date` and `new RegExp` accept.
 - **Opaque values** (structs, bytes, regexps, dates) count as objects without keys where Schemastery tests `isPlainObject`.
 - **Key order**: a jobject keeps insertion order for every key, where JavaScript moves integer-like keys first.
@@ -334,4 +340,4 @@ Deliberate, each pinned by a test:
 
 `raco test racket/cordis-schema` needs neither Node nor a network. It covers: every constructor, modifier and option keyword; every message of 7.3; defaults, `required`, `loose`, `autofix?`, `ignore`, `path`, strict mode; the adapted input; type strings; the JSON form and hydration, including metadata-free nodes and shared and recursive nodes; `simplify`; `i18n`; volatile references, placement rejections and `equal-except-volatile?`, porting `scripts/volatile-config.spec.ts` and `scripts/loader-config-diff.spec.ts`; `define-config` and `schema-object*`, including their syntax errors; and real plugin configs from `docs/racket/recon/17-plugin-authoring-surface.md`.
 
-A differential table, `tests/data/node-table.rktd`, holds at least 150 (schema, input) rows whose expected output or error message, adapted input, type string and JSON form were computed by the vendored Schemastery under Node. `tests/gen/gen-node-table.mjs` writes it (`node --experimental-transform-types`, Node built-ins only, the vendored sources loaded through a resolve hook) and is checked in beside it.
+A differential table, `tests/data/node-table.rktd`, holds results computed by the vendored Schemastery under Node: 298 schemas (178 written by hand to cover every type, modifier, option and message and the plugin configs above, 120 random) with 1195 inputs, each with the resolved value or the error message and path, the rewritten input and the simplified value; the two type strings and the JSON form of every schema; 72 `simplify` rows, 14 `i18n` rows, 36 rows of the loader's `equalExceptVolatile`, and 127 regular expressions against 70 strings each. `tests/node-table-test.rkt` checks every row with the schema built by the public constructors and again with the schema read from Node's JSON form. `tests/gen/gen-node-table.mjs` writes the table (`node --experimental-transform-types`, Node built-ins only, the vendored sources loaded through a resolve hook) and is checked in beside it; `--seed`, `--random` and `--out` make a larger random table for one-off runs. The random part avoids the constructs whose differences section 13 lists.

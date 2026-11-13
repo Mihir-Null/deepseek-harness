@@ -271,7 +271,7 @@
 ;; lex-string : the value of the string literal that starts at `start`, and the offset after it.
 (define (lex-string src start)
   (define len (string-length src))
-  (define quote (string-ref src start))
+  (define delimiter (string-ref src start))
   (define out (open-output-string))
   (define pending-high (box #f))
   (let loop ([i (add1 start)])
@@ -279,7 +279,7 @@
       (raise-js-syntax-error "Invalid or unexpected token (unterminated string literal)" start))
     (define c (string-ref src i))
     (cond
-      [(char=? c quote)
+      [(char=? c delimiter)
        (check-no-pending-high! pending-high)
        (values (get-output-string out) (add1 i))]
       [(char=? c #\\)
@@ -490,7 +490,9 @@
   (define position (token-start (peek p)))
   (advance! p)
   (when (punct? p ".")
-    (raise-js-unsupported "new.target" position))
+    (if (token-is? (peek-after p) 'id "target")
+        (raise-js-unsupported "new.target" position)
+        (unexpected p)))
   (define base (if (keyword? p "new") (parse-new p) (parse-primary p)))
   (define callee (parse-chain p base #f))
   (define arguments (if (punct? p "(") (parse-arguments p) '()))

@@ -22,7 +22,7 @@
   (define kernel-custodian (make-custodian c))
   (define scheduler (or s (make-scheduler #:name name #:custodian kernel-custodian)))
   (define k
-    (kernel name scheduler (not s) kernel-custodian (current-parameterization)
+    (kernel name scheduler (not s) kernel-custodian
             #f #f
             (make-hasheq) (make-hasheq) (make-hasheq) (make-hasheq) (make-hasheq) (make-dlist)
             0 0 0

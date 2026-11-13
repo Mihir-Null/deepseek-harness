@@ -927,3 +927,30 @@
     (await (thread-dead-evt worker))
     (check-equal? (unbox outcome) '(#t active disposed #f #f))
     (check-equal? (notes log) '((apply value #t) (heard 1 #t) unload))))
+
+;; source: recon 01 S27, reduced to what contract 8 keeps of the Logger service:
+;; "(ctx-logger ctx [topic #f]) -> logger? ; child of the 'cordis logger, named
+;; after the fiber". logger.ts derives the default name with hyphenate, so
+;; "LoggingPlugin" and "logging-plugin" are both accepted.
+(test-case "S27 (reduced): ctx-logger is a child of the cordis logger named after the fiber"
+  (with-root (ctx)
+    (define f (ctx-plugin ctx (named "LoggingPlugin" (lambda (c config) (void)))))
+    (await f)
+    (define logger (ctx-logger (fiber-context f)))
+    (check-true (logger? logger))
+    (check-regexp-match #rx"^(?i:logging-?plugin)$" (format "~a" (logger-name logger)))
+    (check-true (logger? (ctx-logger ctx)))
+    (check-true (logger? (ctx-logger ctx 'spec-topic)))
+    ;; An event logged through it reaches a receiver on the cordis logger.
+    (define receiver (make-log-receiver cordis-logger 'info))
+    (log-message logger 'info "hello from the plugin" 'payload)
+    (define records
+      (let loop ([acc '()])
+        (define record (sync/timeout 0 receiver))
+        (if record (loop (cons record acc)) (reverse acc))))
+    (check-true (and (memf (lambda (record)
+                             (and (eq? (vector-ref record 0) 'info)
+                                  (regexp-match? #rx"hello from the plugin" (vector-ref record 1))
+                                  (eq? (vector-ref record 2) 'payload)))
+                           records)
+                     #t))))

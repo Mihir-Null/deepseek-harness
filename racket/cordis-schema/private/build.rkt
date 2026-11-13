@@ -3,8 +3,8 @@
 ;; and the modifiers. Every function returns a new schema and leaves its arguments unchanged.
 ;; source: vendor/schemastery/src/index.ts (defineMethod calls, Schema.from, prototype methods)
 ;;
-;; Nothing here checks argument types beyond what each comment states; `cordis-schema`
-;; (main.rkt) attaches the contracts.
+;; Nothing here checks argument types beyond what each comment states; `private/api.rkt`
+;; attaches the contracts.
 
 (require (for-syntax racket/base)
          cordis-data
@@ -346,7 +346,7 @@
   (schema-union
    (list (schema-is "RegExp" regexp-value?)
          (schema-transform (schema-role (schema-string) "regexp" (jobject 'flag flag))
-                           (lambda (value) (js-regexp value flag))
+                           (lambda (value) (js-regexp value flag #:units? #f))
                            #t
                            #:source regexp-source))))
 

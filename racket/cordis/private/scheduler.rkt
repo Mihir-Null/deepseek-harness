@@ -285,10 +285,19 @@
   (break-thread (task-thread t))
   (void))
 
+;; `kill-thread` wants a current custodian that manages the thread. That is the custodian
+;; the task was spawned under, unless the thread was handed to another one since (the kernel
+;; does that for a task that waits for the unload of its own fiber); the scheduler's
+;; custodian, which the kernel's custodians descend from, is tried next.
 (define (task-kill! t)
-  (unless (thread-dead? (task-thread t))
-    (parameterize ([current-custodian (task-custodian t)])
-      (kill-thread (task-thread t))))
+  (define th (task-thread t))
+  (define (kill-under custodian)
+    (parameterize ([current-custodian custodian])
+      (kill-thread th)))
+  (unless (thread-dead? th)
+    (with-handlers ([exn:fail:contract?
+                     (lambda (e) (kill-under (scheduler-custodian (task-scheduler t))))])
+      (kill-under (task-custodian t))))
   (void))
 
 ;; Marks a failure as seen so that it is not reported as unobserved.

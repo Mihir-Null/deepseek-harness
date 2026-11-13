@@ -3,8 +3,8 @@
 ;; the special schemes (http, https, ws, wss, ftp, file), and the object `new URL(...)` yields.
 ;; source: https://url.spec.whatwg.org/ (basic URL parser, host parser, URL serializer)
 ;;
-;; Not implemented, and raised as unsupported: other schemes, IPv6 hosts, hosts that need IDNA
-;; or percent-decoding, and `searchParams`.
+;; Not implemented, and raised as unsupported: other schemes, IPv6 hosts, hosts that need IDNA,
+;; and `searchParams`.
 
 (require racket/list
          racket/string
@@ -40,7 +40,8 @@
 (define (fragment-set? n) (or (c0-control-set? n) (code-in? n " \"<>`")))
 (define (query-set? n) (or (c0-control-set? n) (code-in? n " \"#<>")))
 (define (special-query-set? n) (or (query-set? n) (= n 39)))
-(define (path-set? n) (or (query-set? n) (code-in? n "?^`{}")))
+;; Node 22 leaves "^" in a path as written, so it is not in this set.
+(define (path-set? n) (or (query-set? n) (code-in? n "?`{}")))
 (define (userinfo-set? n) (or (path-set? n) (code-in? n "/:;=@[\\]|")))
 
 ;; The character itself, or the %XX escapes of its UTF-8 bytes when it is in the set.
@@ -114,17 +115,43 @@
                     (number->string (bitwise-and (arithmetic-shift address (- shift)) 255)))
                   ".")]))
 
+(define (hex-digit c)
+  (cond [(char<=? #\0 c #\9) (- (char->integer c) 48)]
+        [(char<=? #\a c #\f) (- (char->integer c) 87)]
+        [(char<=? #\A c #\F) (- (char->integer c) 55)]
+        [else #f]))
+
+;; The bytes of `input` with every %XX sequence replaced by the byte it names; a "%" that is
+;; not followed by two hexadecimal digits stays.
+(define (percent-decode input)
+  (define bytes (string->bytes/utf-8 input))
+  (define len (bytes-length bytes))
+  (define out (open-output-bytes))
+  (let loop ([i 0])
+    (when (< i len)
+      (define b (bytes-ref bytes i))
+      (define high (and (= b 37) (< (+ i 2) len) (hex-digit (integer->char (bytes-ref bytes (+ i 1))))))
+      (define low (and high (hex-digit (integer->char (bytes-ref bytes (+ i 2))))))
+      (cond [low
+             (write-byte (+ (* 16 high) low) out)
+             (loop (+ i 3))]
+            [else
+             (write-byte b out)
+             (loop (add1 i))])))
+  (get-output-bytes out))
+
 ;; parse-host : the serialized host of a special URL, or #f for an invalid host.
 (define (parse-host input)
+  (define decoded (percent-decode input))
   (cond
     [(and (positive? (string-length input)) (char=? (string-ref input 0) #\[))
      (if (char=? (string-ref input (sub1 (string-length input))) #\])
          (raise-js-unsupported "IPv6 host in a URL")
          #f)]
-    [(for/or ([c (in-string input)]) (or (char=? c #\%) (> (char->integer c) #x7F)))
-     (raise-js-unsupported "URL host that needs percent-decoding or IDNA")]
+    [(for/or ([b (in-bytes decoded)]) (> b #x7F))
+     (raise-js-unsupported "URL host that needs IDNA")]
     [else
-     (define domain (string-downcase input))
+     (define domain (string-downcase (bytes->string/latin-1 decoded)))
      (cond
        [(regexp-match? #rx"(^|[.])xn--" domain)
         (raise-js-unsupported "URL host with a punycode label")]

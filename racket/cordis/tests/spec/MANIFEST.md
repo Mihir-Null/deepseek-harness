@@ -21,7 +21,7 @@ The suite follows the contract as of its section 12 addenda: cooperative breaks 
 
 `schedules-spec-test.rkt` runs 200 schedules for each of laws 18 to 21 and 36 to 39. Each schedule draws from its own `make-pseudo-random-generator`, seeded from the base seed, the law number and the schedule index. The base seed is the environment variable `CORDIS_TEST_SEED`, or `20261113` when it is unset. A failure message names the law, the schedule index and the base seed, for example `law 37, schedule 12 of 200: ... (rerun with CORDIS_TEST_SEED=20261113)`.
 
-Laws 21 and 36 to 39 run over random acyclic graphs of four to six plugin specs and three or four service keys. Specs are ranked; a spec injects only keys whose provider has a lower rank (or, rarely, a key nobody provides), a child spec is mounted by the body of a lower-ranked top-level spec, and a key has at most one provider. The schedule applies random inserts, disposals, dispose-and-reinsert replacements, config updates and restarts to top-level specs, with random yields in the driver and inside plugin bodies and inverses. Every plugin body also checks law 22 (each injected key has an active provider when the body starts) and every inverse checks law 24 (each injected key is still readable).
+Laws 21 and 36 to 39 run over random acyclic graphs of four to six plugin specs and three or four service keys. Specs are ranked; a spec injects only keys whose provider has a lower rank (or, rarely, a key nobody provides), a child spec is mounted by the body of a lower-ranked top-level spec, and a key has at most one provider. The schedule applies random inserts, disposals, dispose-and-reinsert replacements, config updates and restarts to top-level specs, with random yields in the driver and inside plugin bodies and inverses. Every plugin body also checks law 22 (each injected key has an active provider when the body starts), and every inverse checks law 23 (no provider of an injected key has started its own inverse) and law 24 (each injected key is still readable), when the inverse begins and when it ends.
 
 ## Where each requirement is covered
 
@@ -290,7 +290,7 @@ In the tables below, "contract N" is a section of the kernel contract, "recon 01
 | law 19: registrations on different services commute | digest law 19 (Theorem 45) |
 | law 20: unloading one component leaves an unrelated one unchanged | digest law 20 (Theorem 68) |
 | law 21: every step of a random schedule keeps the system well formed | digest law 21 (Definition 63; Theorem 64) |
-| law 36: every random schedule over an acyclic graph reaches quiescence | digest law 36 (Theorem 73); the schedule also carries the probes of laws 22 and 24 in every plugin body and inverse |
+| law 36: every random schedule over an acyclic graph reaches quiescence | digest law 36 (Theorem 73); the schedule also carries the probes of laws 22, 23 and 24 in every plugin body and inverse |
 | law 37: at quiescence the active fibers are the least supported set | digest law 37 (Lemma 77) |
 | law 38: the quiescent observation does not depend on the schedule | digest law 38 (Theorem 80(2)): same plugins and configs, different insertion orders and interleavings of asynchronous steps |
 | law 39: the quiescent observation does not depend on the history | digest law 39 (Theorem 80(1)): add, remove, add again, replace a provider, update a config, then arrive at the final configuration |

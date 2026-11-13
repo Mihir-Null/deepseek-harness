@@ -7,8 +7,7 @@
 ;; a schema is serialized: the distinct schema values reachable from the root are numbered from
 ;; 0 in depth-first post-order, so equal schemas give equal text.
 
-(require racket/list
-         cordis-data
+(require cordis-data
          "js.rkt"
          "schema.rkt"
          "build.rkt")

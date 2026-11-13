@@ -45,11 +45,22 @@
     [(or (boolean? v) (eq? v 'null)) v]
     [(list? v) (list->vector (map value->datum v))]
     [(jobject? v)
-     (for/list ([(key item) (in-jobject v)])
-       (cons (symbol->string key) (value->datum item)))]
+     (for/list ([key (in-list (javascript-key-order (jkeys v)))])
+       (cons (symbol->string key) (value->datum (jref v key))))]
     [(volatile? v) (make-prefab-struct 'volatile (value->datum (volatile-ref v)))]
     [(procedure? v) (make-prefab-struct 'function)]
     [else (make-prefab-struct 'opaque (format "~a" v))]))
+
+;; The keys in the order JavaScript enumerates them: array indexes first, ascending, then the
+;; rest in insertion order. A jobject keeps insertion order for every key (a documented
+;; difference), so the comparison with Node's output applies JavaScript's order.
+(define (javascript-key-order keys)
+  (define (index key)
+    (define text (symbol->string key))
+    (and (regexp-match? #px"^(0|[1-9][0-9]*)$" text)
+         (let ([n (string->number text)]) (and (< n 4294967295) n))))
+  (append (sort (filter index keys) < #:key index)
+          (filter (lambda (key) (not (index key))) keys)))
 
 ;; Datums as the reader gives them, with strings made comparable to computed ones.
 (define (normalize-datum d)
@@ -190,7 +201,8 @@
                        #:autofix? (and (assq 'autofix options) #t)
                        #:strict? (and (assq 'strict options) #t)
                        #:ignore (cond
-                                  [(assq 'ignore options) => (lambda (p) (hash-ref ignores (cdr p)))]
+                                  [(assq 'ignore options)
+                                   => (lambda (p) (hash-ref ignores (cdr p)))]
                                   [else #f])
                        #:path (cond
                                 [(assq 'path options)
@@ -309,6 +321,32 @@
     (expect! "equal-except-volatile? without a schema" context
              (equal-except-volatile? (datum->value a) (datum->value b) #f)
              without-schema))
+
+  ;; ---- regular expressions ----
+  (for ([row (in-list (section 'patterns))])
+    (match-define (list source flags stored-source stored-flags text results) row)
+    (define context (format "/~a/~a" source flags))
+    (define s
+      (with-handlers ([exn:fail? (lambda (e)
+                                   (fail! "pattern: ~a\n  ~a" context (exn-message e))
+                                   #f)])
+        (schema-pattern (schema-string) source #:flags flags)))
+    (when s
+      (expect! "pattern metadata" context
+               (value->datum (schema-meta-ref s 'pattern))
+               (list (cons "source" stored-source) (cons "flags" stored-flags)))
+      (for ([result (in-list results)])
+        (count! 'patterns)
+        (define input (car result))
+        (define outcome
+          (with-handlers ([exn:fail:schema? exn-message])
+            (s input)
+            #t))
+        (expect! "pattern" (format "~a on ~s" context input)
+                 outcome
+                 (or (cdr result)
+                     (string->immutable-string
+                      (format "expect string to match regexp ~a" text)))))))
 
   (values (for/hasheq ([(key n) (in-hash counts)]) (values key n))
           (reverse failures)))

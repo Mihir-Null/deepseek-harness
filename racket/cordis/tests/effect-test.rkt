@@ -114,6 +114,26 @@
     (fiber-dispose! f)
     (check-eq? (fiber-state child) 'disposed)))
 
+(test-case "results: asynchronous setup continues under the caller's parameterization"
+  (define current-cause (make-parameter 'none))
+  (define-values (note notes) (make-recorder))
+  (with-root-context (ctx)
+    (define f (mount ctx))
+    (define c (fiber-context f))
+    (define g (gate))
+    (define d
+      (parameterize ([current-cause 'caller])
+        (ctx-effect c (lambda ()
+                        (generator ()
+                          (note (list 'first-step (current-cause)))
+                          (yield (semaphore-peek-evt g))
+                          (note (list 'after-the-wait (current-cause)))
+                          (void))))))
+    (check-false (sync/timeout 0 d))
+    (gate-open! g)
+    (await/t d))
+  (check-equal? (notes) '((first-step caller) (after-the-wait caller))))
+
 (test-case "thunk runs with current-context and the owner's custodian; the effect macro labels"
   (with-root-context (ctx)
     (define f (mount ctx))

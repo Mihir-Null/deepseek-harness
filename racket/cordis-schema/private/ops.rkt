@@ -36,6 +36,16 @@
                      (cons (number->string index) (string char))))]
     [else empty-jobject]))
 
+;; `Object.assign(result, source)`. An array element that is undefined takes its key out of the
+;; result, which is how a member that is undefined reads here.
+(define (assign-all result source)
+  (cond
+    [(list? source)
+     (for/fold ([result result]) ([item (in-list source)] [index (in-naturals)])
+       (define key (string->symbol (number->string index)))
+       (if (void? item) (jremove result key) (jset result key item)))]
+    [else (jmerge result (enumerable source))]))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; Simplification
 
@@ -79,19 +89,22 @@
          (if child (simplify child item) item))]
       [(equal? type "intersect")
        (for/fold ([result empty-jobject]) ([member (in-list (or (node-members s) '()))])
-         (jmerge result (enumerable (simplify member data))))]
+         (assign-all result (simplify member data)))]
       [(equal? type "union")
-       (or (for/first ([member (in-list (or (node-members s) '()))]
-                       #:when (resolves? member data))
-             (simplify member data))
-           data)]
+       ;; The first member that resolves the value and simplifies it without failing; a
+       ;; failure of either step moves on, as Schemastery's bare `catch` does.
+       (let loop ([members (or (node-members s) '())])
+         (cond
+           [(null? members) data]
+           [else
+            (define attempt
+              (with-handlers ([exn:fail? (lambda (e) failed)])
+                (resolve data (car members) (make-resolve-options #f #f '()) #f)
+                (simplify (car members) data)))
+            (if (eq? attempt failed) (loop (cdr members)) attempt)]))]
       [else data])))
 
-;; Whether `s` resolves `data`; any failure counts as no, as Schemastery's bare `catch` does.
-(define (resolves? s data)
-  (with-handlers ([exn:fail? (lambda (e) #f)])
-    (resolve data s (make-resolve-options #f #f '()) #f)
-    #t))
+(define failed (string->uninterned-symbol "failed"))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Localized descriptions

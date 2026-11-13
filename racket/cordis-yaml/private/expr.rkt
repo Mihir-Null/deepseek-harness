@@ -3,10 +3,17 @@
 ;; evaluated. Two nodes are `equal?` when their sources are; the location and the cached parse
 ;; do not take part.
 
-(provide js-expr?
-         make-js-expr
-         js-expr-source
-         js-expr-srcloc
+(require racket/contract/base)
+
+;; `cordis-yaml` and `cordis-yaml/js-expr` both export the first four bindings; the contracts
+;; are attached here so that the two modules export the same bindings and a client may require
+;; both.
+(provide (contract-out
+          [js-expr? predicate/c]
+          [make-js-expr (->* (string?) ((or/c srcloc? #f)) js-expr?)]
+          [js-expr-source (-> js-expr? string?)]
+          ;; Where the node's tag starts in the YAML text it was read from, or #f.
+          [js-expr-srcloc (-> js-expr? (or/c srcloc? #f))])
          js-expr-cached-ast
          set-js-expr-cached-ast!)
 

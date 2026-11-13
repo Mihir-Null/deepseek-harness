@@ -268,8 +268,10 @@
 ;; One top-level spec's place in a running schedule.
 (struct slot (fiber config busy) #:mutable)
 
-;; A schedule in progress on one root.
-(struct env (ctx g specs slots children tracked problems interleave?))
+;; A schedule in progress on one root. `serving` maps a key to #t from the
+;; moment a provider's body has provided it until that provider's own inverse
+;; has started to run.
+(struct env (ctx g specs slots children tracked problems interleave? serving))
 
 (define (make-env ctx g specs interleave?)
   (env ctx
@@ -280,7 +282,8 @@
        (make-hasheqv)
        (box '())
        (make-recorder)
-       interleave?))
+       interleave?
+       (make-hasheq)))
 
 (define (track! e f)
   (set-box! (env-tracked e) (cons f (unbox (env-tracked e)))))
@@ -301,7 +304,8 @@
                    (spec-name s) k)))
      (ctx-on c (string->symbol (format "sched/~a" (spec-name s))) void)
      (when (spec-key s)
-       (ctx-provide c (spec-key s) (list (spec-name s) config)))
+       (ctx-provide c (spec-key s) (list (spec-name s) config))
+       (hash-set! (env-serving e) (spec-key s) #t))
      (when (env-interleave? e) (yield-times (random 3 g)))
      ;; A fiber disposed while its body yielded can no longer mount children.
      (when (fiber-uid (context-fiber c))
@@ -310,14 +314,22 @@
          (track! e f)
          (hash-set! (env-children e) (spec-rank child) f)))
      (lambda ()
-       ;; law 24: an injected service is still readable during teardown
-       (for ([k (in-list (spec-injects s))])
-         (with-handlers ([exn:fail? (lambda (x)
-                                      (problem! (env-problems e)
-                                                "~a could not read ~a during teardown: ~a"
-                                                (spec-name s) k (exn-message x)))])
-           (ctx-ref c k)))
-       (when (env-interleave? e) (yield-times (random 2 g)))))
+       (define (check-providers! when)
+         (for ([k (in-list (spec-injects s))])
+           ;; law 23: no inverse of a provider runs before this consumer has unloaded
+           (unless (hash-ref (env-serving e) k #f)
+             (problem! (env-problems e) "~a ~a its teardown after the provider of ~a ran its own"
+                       (spec-name s) when k))
+           ;; law 24: an injected service is still readable during teardown
+           (with-handlers ([exn:fail? (lambda (x)
+                                        (problem! (env-problems e)
+                                                  "~a could not read ~a during teardown: ~a"
+                                                  (spec-name s) k (exn-message x)))])
+             (ctx-ref c k))))
+       (check-providers! "began")
+       (when (env-interleave? e) (yield-times (random 2 g)))
+       (check-providers! "ended")
+       (when (spec-key s) (hash-set! (env-serving e) (spec-key s) #f))))
    #:name (spec-name s)
    #:inject (spec-injects s)))
 
@@ -499,7 +511,7 @@
        (report (env-problems e))))))
 
 ;; source: digest law 36 (Theorem 73); the schedule also carries the probes of
-;; laws 22 and 24 in every plugin body and inverse
+;; laws 22, 23 and 24 in every plugin body and inverse
 (test-case "law 36: every random schedule over an acyclic graph reaches quiescence"
   (check-schedules
    36

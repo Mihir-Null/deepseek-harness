@@ -143,7 +143,7 @@ bundled-skill-rank                               ; 600
 
 ### Presets (`dsh-context/preset`)
 
-A *preset definition* is the validated config of one `@deepseek-ai/dsh-agent-preset` row: `(struct preset-definition (id name description order plugins))`, with `plugins` the list of entry rows exactly as the loader handed them over (jobjects that may hold `js-expr` values). Values that cross to user interfaces are jobjects: a roster row `{id, name?, description?, order?, broken?}`; a Remote roster `{presets: [{…row, isDefault}…]}`; a document `{agentPreset, content, name?, description?}`; an inspection `{id, modules: [{moduleName, baseUrl?, useHostBase}…], leakedServices}`; an inventory entry `{id, name?, description?, isDefault, broken?, rows: [{entryId, moduleName, enabled, condition?, fiberState?}…]}` with `enabled` `#t`, `#f` or `"conditional"`. A *generation* is the private record `{scope, key, mount, users, retired?}` of one mounted revision; its `key` is a fresh instance of the opaque struct `preset-scope-key` and is the scope key that bound agents get as scope parent.
+A *preset definition* is the validated config of one `@deepseek-ai/dsh-agent-preset` row: `(struct preset-definition (id name description order plugins))`, with `plugins` the list of entry rows exactly as the loader handed them over (jobjects that may hold `js-expr` values). Values that cross to user interfaces are jobjects: a roster row `{id, name?, description?, order?, broken?}`; a Remote roster `{presets: [{…row, isDefault}…]}`; a document `{agentPreset, content, name?, description?}`; an inspection `{id, modules: [{moduleName, baseUrl?, useHostBase}…], leakedServices}`; an inventory entry `{id, name?, description?, isDefault, broken?, rows: [{entryId, moduleName, enabled, condition?, fiberState?}…]}` with `enabled` `#t`, `#f` or `"conditional"`. A *generation* is the private record `{scope, key, mount, users, retired?}` of one mounted revision; its `key` is a fresh instance of the opaque struct `preset-scope-key` and is the scope key that bound agents get as scope parent. Coded failures are `(struct exn:fail:agent-preset exn:fail:harness (details))` (Services, `agentPresets`).
 
 ### Agent instructions, references
 
@@ -164,16 +164,16 @@ A file reference candidate is the jobject `{path, kind}` with `kind` `"file"` or
 
 ### Ports (`dsh-context/ports`)
 
-Services owned by sibling wave 4 packages and by wave 5 are called only through this module. Each procedure reads the service with `ctx-get`. When the mounted value implements the matching generic interface declared in this module (test doubles do), the method is called. Otherwise the procedure named in the third column is called, resolved once with `dynamic-require`; a missing module or binding raises `exn:fail` `dsh-context: port <name> cannot reach <module> <binding>`. `port-…?` predicates report whether the service is mounted.
+Services owned by sibling wave 4 packages and by wave 5 are called only through this module. Each port is a generic interface declared here, with the convention of [WAVE3.md](WAVE3.md): a method takes the provider's value first and, when it registers an effect, the owning context second. Each port also has a wrapper procedure, listed below, that takes a context, reads the service with `ctx-get` and calls the method when the mounted value implements the interface (test doubles and providers that adopt the interface do). Otherwise the wrapper calls the owner's own procedure named in the third column, resolved once with `dynamic-require`; a missing module or binding raises `exn:fail` `dsh-context: port <name> cannot reach <module> <binding>`. `port-…?` predicates report whether the service is mounted. The fallback exists because the wave 4 packages are built at the same time and a provider cannot require every consumer's port module.
 
 | Port procedure | Service key | Assumed owner procedure |
 |---|---|---|
 | `(port-working-directory-ensure ctx agent cancel) -> path-string?` | `workingDirectory` | `dsh-session-store/working-directory` `(working-directory-ensure ctx agent #:cancel cancel)` |
-| `(port-fs ctx) -> (or/c fs-port? #f)`; `(port-fs-resolve fs path) -> target`; `(port-fs-stat fs target cancel) -> (or/c #f jobject?)` (`{type, size?, version?}`); `(port-fs-read-text fs target cancel #:max-bytes [n #f]) -> string?`; `(port-fs-list-dir fs target) -> (listof jobject?)` (`{name, type, displayPath}`); `(port-fs-process-path fs target) -> string?` | `fs` | `dsh-fs/fs` `fs-resolve`, `fs-stat`, `fs-read-text` (and `fs-stream-text` for the bounded read), `fs-list-dir`, `fs-process-path`; error codes `FS_NOT_FOUND`, `FS_NOT_DIRECTORY`, `FS_NOT_TEXT` read with `exn:fail:harness-code` |
-| `(port-shell-run ctx command cancel) -> (or/c #f (cons/c exact-integer? string?))` (exit code, stdout text) | `shell` | `dsh-exec/shell` `shell-resolve`, `shell-execute`, the result accessors |
+| `(port-fs ctx) -> (or/c fs-port? #f)`; `(port-fs-resolve fs path) -> target`; `(port-fs-stat fs target cancel) -> (or/c #f fs-stat?)` with `(struct fs-stat (type size version))`, `type` one of `'file`, `'directory`, `'other`; `(port-fs-read-text fs target cancel #:max-bytes [n #f]) -> (or/c string? #f)` (`#f` when the text exceeds `n` bytes); `(port-fs-list-dir fs target) -> (listof fs-entry?)` with `(struct fs-entry (name type display-path))`; `(port-fs-process-path fs target) -> string?`; `(port-fs-display-path target) -> string?` | `fs` | `dsh-fs/fs`: `fs-resolve`, `fs-stat` (an `fs-info`), `fs-read-text`, `fs-stream-text` for the bounded read, `fs-list-dir` (`fs-dir-entry` values), `fs-process-path`, `fs-target->jvalue` for the display path; failures are harness errors named `FsError` with codes `FS_NOT_FOUND`, `FS_NOT_DIRECTORY`, `FS_NOT_TEXT` |
+| `(port-shell-run ctx command cancel) -> (or/c #f (cons/c exact-integer? string?))` (exit code, stdout text) | `shell` | `dsh-exec/shell`: `make-shell-request`, `shell-resolve`, `shell-execute`, `shell-execution-result`, `shell-run-result-exit-code` and the `text` of its `stdout` |
 | `(port-commands-register! ctx #:definition-id id #:name n #:description d #:handler h) -> disposer?`; `(invocation-raw-input i)`, `(invocation-agent i)`, `(invocation-cancel i)`, `(invocation-command-id i)` | `commands` | `dsh-interaction/commands` `commands-register!` and the invocation accessors; a handler returns the jobject `{kind, text, sourceEventSeq?}` |
 | `(port-session-query-list ctx cancel) -> (listof jobject?)`; `(port-session-query-read-surface ctx id) -> jobject?` | `sessionQuery` | `dsh-session-store/query` `session-query-list-sessions`, `session-query-read-surface` |
-| `(port-spill-save ctx #:name suggested #:source source #:text text) -> jobject?` | `spillStore` | `dsh-fs/spill` `spill-save!` |
+| `(port-spill-save ctx #:session-id id #:name suggested #:source source #:text text) -> jobject?` (the spill reference as JSON) | `spillStore` | `dsh-fs/spill`: `spill-save-text` |
 | `(port-web-app-url ctx) -> string?` | `webApp` | `dsh-web` `web-app-advertised-url` |
 | `(port-profile-preflight ctx rows base-url) -> list?` | `profileContext` | `dsh-boot` `prepare-profile-entries`; without the service the rows are returned unchanged |
 
@@ -278,7 +278,7 @@ agent-presets-remote-methods    ; (list (cons "list" …) (cons "read" …) (con
 | `agent-presets-select!` | `agent-preset/locked`; those of `recompose!` | those of `recompose!`; appends `agent-preset/selected` |
 | the readers | `agent-preset/not-found` from `resolve` and `read-document` | none |
 
-The three coded failures are `exn:fail:harness` values with dsh error name `RemoteError`, the code as given, and details `{agentPreset, available}`, `{agentPreset, reason}` or `{sessionId, agentPreset}`; their messages are `Unknown agent preset: <id>`, the reason itself, and `This session has already started`. Other failures are `exn:fail` with the exact message.
+The three coded failures are values of `(struct exn:fail:agent-preset exn:fail:harness (details))`, made by `(make-agent-preset-error code message details)`, with dsh error name `RemoteError`, the code as given, and details `{agentPreset, available}`, `{agentPreset, reason}` or `{sessionId, agentPreset}`; their messages are `Unknown agent preset: <id>`, the reason itself, and `This session has already started`. The substruct carries the details, as `exn:fail:llm-discovery-rejected` does in `dsh-llm`, so nothing depends on a details field of `exn:fail:harness`; `dsh-web` maps them to its remote error type. Other failures are `exn:fail` with the exact message.
 
 ### Waiting and cancellation
 
@@ -304,7 +304,7 @@ The three coded failures are `exn:fail:harness` values with dsh error name `Remo
 
 `dsh-context/skills` exports `on-skills/change`; `dsh-context/compaction` exports `on-compaction/summary-error` and `dispatch-compaction/summary-error` (a replacement engine needs the dispatcher); `dsh-context/preset` exports `on-agent-preset/selected`. The preset registry also dispatches `tools/change` through `dispatch-tools/change` of `dsh-tools/tools`.
 
-Consumed, owned elsewhere: `agent/pre-step` (compaction-basic before `next`; agent-instructions, tool-skill twice, and with `#:prepend? #t` time-context, tmux-context, session-reference, all after `next`); `agent/request` with `#:prepend? #t`, `agent/request-error`, `agent/status` (compaction-basic); `agent/request-error` (image offload); `agent/created`, `agent/disposed` (file-reference-local); `session/event` (compaction-basic, agent-instructions, file-reference-local, the preset registry); `tools/result` (agent-instructions); `fs/observed`, registered by name with `ctx-on` (skill-filesystem; arguments `(target observation actor)`, read with the `fs` port's display path and `(jref actor 'name)`).
+Consumed, owned elsewhere: `agent/pre-step` (compaction-basic before `next`; agent-instructions, tool-skill twice, and with `#:prepend? #t` time-context, tmux-context, session-reference, all after `next`); `agent/request` with `#:prepend? #t`, `agent/request-error`, `agent/status` (compaction-basic); `agent/request-error` (image offload); `agent/created`, `agent/disposed` (file-reference-local); `session/event` (compaction-basic, agent-instructions, file-reference-local, the preset registry); `tools/result` (agent-instructions); `fs/observed`, registered by name with `ctx-on` (skill-filesystem; arguments `(target observation actor)`, read with `port-fs-display-path` and, when the actor is a tool definition or a jobject, its name).
 
 ## Tools
 
@@ -360,7 +360,7 @@ Every `#:name` is the npm name; `#:meta` records the dsh plugin name under `'dsh
 
 `sessions` is added to the pruner's inject list because the Racket body registers event types (rule 3); it changes nothing for a dsh configuration, which always mounts `sessions` on the host plane.
 
-Config schemas (exactly the dsh keys; "unknown keys fail" means the schema is closed):
+Config schemas (exactly the dsh keys; "unknown keys fail" means the schema is closed). A rejected config fails the mount with `exn:fail:cordis:validation`, whose message starts `invalid config:` (WAVE3.md, "Config validation text"):
 
 | Plugin | Field | Type | Default |
 |---|---|---|---|
@@ -436,8 +436,6 @@ Plugin bodies, in order:
 - `agent-preset`: `(agent-presets-register! agent-presets (preset-definition id name description order plugins))`, returned as the body's effect result so the row's fiber owns the definition and stays `'loading` until activation settled. `#:meta` carries `'entry-group #t`, which tells the loader not to evaluate `!!js` values inside this row's `config`.
 - `persona`: rule 101.
 
-`dsh-context/plugins` provides `plugin-table` with those eighteen rows.
-
 ### What each Web mode needs from this package
 
 The four modes are the preset rows of `packages/bundle/web-app/presets/{standard,ptc,minimal,cordis}.patch.yml`, loaded unchanged (R3 appendix G to J and Algorithms 19). The host plane must hold `@deepseek-ai/dsh-agent-preset-registry` (config `default: standard`), `@deepseek-ai/dsh-skill` and `@deepseek-ai/dsh-compaction-image-offload`. Per preset this package supplies:
@@ -449,6 +447,33 @@ The four modes are the preset rows of `packages/bundle/web-app/presets/{standard
 | Minimal (`minimal`, 3) | `persona` with `complete: true` and `includeRuntimeContext: false`; group `compaction` (isolate `compaction`) holding `compaction-basic` and `command-compact` | no pruner: `compaction-basic` reads `toolResultPruner` optionally and finds none in its realm |
 
 A row of another package that is missing makes the mount fail with its row line (rule 93); that is the loader's resolution error, not this package's.
+
+### `plugin-table`
+
+`dsh-context/plugins` provides `plugin-table`, eighteen rows. `@deepseek-ai/dsh-file-reference` and `@deepseek-ai/dsh-compaction` are libraries and have no row.
+
+```racket
+(define plugin-table
+  (list
+   (cons "@deepseek-ai/dsh-agent-instructions" 'dsh-context/plugin/agent-instructions)
+   (cons "@deepseek-ai/dsh-time-context" 'dsh-context/plugin/time-context)
+   (cons "@deepseek-ai/dsh-tmux-context" 'dsh-context/plugin/tmux-context)
+   (cons "@deepseek-ai/dsh-harness-dev-context" 'dsh-context/plugin/harness-dev-context)
+   (cons "@deepseek-ai/dsh-file-reference-local" 'dsh-context/plugin/file-reference-local)
+   (cons "@deepseek-ai/dsh-session-reference" 'dsh-context/plugin/session-reference)
+   (cons "@deepseek-ai/dsh-skill" 'dsh-context/plugin/skill)
+   (cons "@deepseek-ai/dsh-skill-filesystem" 'dsh-context/plugin/skill-filesystem)
+   (cons "@deepseek-ai/dsh-tool-skill" 'dsh-context/plugin/tool-skill)
+   (cons "@deepseek-ai/dsh-skill-office" 'dsh-context/plugin/skill-office)
+   (cons "@deepseek-ai/dsh-tool-workspace-dependencies" 'dsh-context/plugin/tool-workspace-dependencies)
+   (cons "@deepseek-ai/dsh-compaction-basic" 'dsh-context/plugin/compaction-basic)
+   (cons "@deepseek-ai/dsh-compaction-tool-result-pruner" 'dsh-context/plugin/compaction-tool-result-pruner)
+   (cons "@deepseek-ai/dsh-compaction-image-offload" 'dsh-context/plugin/compaction-image-offload)
+   (cons "@deepseek-ai/dsh-command-compact" 'dsh-context/plugin/command-compact)
+   (cons "@deepseek-ai/dsh-agent-preset-registry" 'dsh-context/plugin/agent-preset-registry)
+   (cons "@deepseek-ai/dsh-agent-preset" 'dsh-context/plugin/agent-preset)
+   (cons "@deepseek-ai/dsh-persona" 'dsh-context/plugin/persona)))
+```
 
 ## Behaviour
 
@@ -509,7 +534,7 @@ Numbering is for tests. "Raise" without a type means `exn:fail` with the exact m
 33. Listener (prepended, after `next`): for each decision message whose source kind is `user`, parse every text block; when it holds references, replace the message by a copy with the readable text and insert the prepared context message directly after it.
 34. `session-reference-prepare`: deduplicate by session id in first-appearance order; a self reference raises `SESSION_REFERENCE_SELF_REFERENCE` `session <JSON id> cannot reference itself`; more than `maxReferences` raises `SESSION_REFERENCE_TOO_MANY` `a message may reference at most <n> sessions`. The byte budget per source is `maxReferenceBytes` when configured, else `max(65536, floor(contextWindow × 4 × referenceContextFraction))`, and `65536` without an `llm` service, on `NO_ADAPTER`, or without capacity metadata. Each source is read with `port-session-query-read-surface`; a failure raises `SESSION_REFERENCE_READ_FAILED` `failed to read referenced session: <message>`.
 35. Projection of a source: from its current surface keep `user/message` events whose source kind is `user` or `compact-checkpoint`, and `assistant/message` events; the text is the text blocks joined with `\n`; empty items are dropped.
-36. Retention to fit the serialised JSON object in the budget: repeatedly drop the oldest message that is neither a checkpoint nor the newest; then repeatedly shorten the longest remaining text by the overflow, keeping `ceil(n/2)` head bytes and `floor(n/2)` tail bytes around the notice `\n[… omitted <N> UTF-8 bytes …]`; when nothing can shrink raise `SESSION_REFERENCE_BUDGET_EXCEEDED` `referenced session snapshot cannot fit the configured byte budget`. A truncated source is saved in full through `port-spill-save` when a spill store is mounted (suggested name `session-reference-<n>.txt`, source `{kind: "session-reference", sessionId, label}`, body as `spill.ts` writes it).
+36. Retention to fit the serialised JSON object in the budget: repeatedly drop the oldest message that is neither a checkpoint nor the newest; then repeatedly shorten the longest remaining text by the overflow, keeping `ceil(n/2)` head bytes and `floor(n/2)` tail bytes around the notice `\n[… omitted <N> UTF-8 bytes …]`; when nothing can shrink raise `SESSION_REFERENCE_BUDGET_EXCEEDED` `referenced session snapshot cannot fit the configured byte budget`. A truncated source is saved in full through `port-spill-save`, under the requesting agent's session id, when a spill store is mounted (suggested name `session-reference-<n>.txt`, source `{kind: "session-reference", sessionId, label}`, body as `spill.ts` writes it).
 37. The context message text is the two templates of R11 "Session references" (`## Referenced sessions …` and, when any preview was truncated, `## Reference omissions …`), copied verbatim from `session-reference/src/index.ts`; JSON inside the tags is `jvalue->string` text with every `<` replaced by `<`. Its source is `session-reference-source`.
 38. `session-reference-list-candidates`: other sessions from `port-session-query-list`, filtered by case-insensitive substring over id, cwd, label and display title, ranked same-cwd first, then no cwd, then other, stable by listing order, cut to `limit` (default `candidateLimit`; a limit that is not a positive safe integer raises `SESSION_REFERENCE_INVALID_REFERENCE` `candidate limit must be a positive safe integer`).
 
@@ -657,7 +682,7 @@ Tests live in `racket/dsh-context/tests/`. Rows name the TypeScript suite to mir
 | `image-offload-test.rkt` | `compaction-image-offload/tests/{image-offload,projection}.spec.ts` | rules 85 to 87 |
 | `preset-test.rkt` | `agent-preset-registry/tests/*.spec.ts`, `agent-preset/tests/*.spec.ts` | rules 90 to 100: broken definitions stay in the roster, leak audit, revision retention across a definition update, select lock, compose-from |
 | `persona-test.rkt` | `preset/persona/tests/persona.spec.ts` | rule 101 |
-| `plugins-test.rkt` | none | every row of `plugin-table` loads; config schemas accept the shipped preset configs and reject unknown keys where stated |
+| `plugins-test.rkt` | none | every row of `plugin-table` loads; config schemas accept the shipped preset configs and reject unknown keys where stated; one rejected config per plugin raises with the prefix `invalid config:` |
 
 Fixtures: an in-memory `fs` port and a working-directory port double; a token-meter double with scripted node prices for range selection; the entry rows of the four preset files with rows of other packages replaced by empty stand-in plugins of the same names. Key-order fixtures, compared as `jvalue->string` text after the normaliser of `dsh-test-support`: the `compaction/start`, `compaction/summary`, replacement `user/message` and `compaction/end` lines of `snapshots/sdk/manual-compact/session.v4.jsonl`; the catalog and invocation messages of `snapshots/session/skill-load/session.v4.jsonl`; the instruction messages of `snapshots/session/agent-instructions/session.v4.jsonl`.
 
@@ -667,7 +692,7 @@ Acceptance gate: `raco test racket/dsh-context` passes with no network, no Node 
 
 ## Open questions
 
-1. **Sibling names behind the ports.** The third column of the ports table is a guess at contracts written in parallel. Recommended default: keep the port signatures of this document and adjust only the bodies of `dsh-context/ports` when the sibling contracts are final.
+1. **Sibling names behind the ports.** The owner procedures of `fs`, `spillStore` and `shell` were taken from the drafts of `dsh-fs.md` and `dsh-exec.md`; those of `workingDirectory`, `sessionQuery`, `commands`, `webApp` and `profileContext` are guesses at contracts not yet written. Sibling contracts declare their own consumer-owned port interfaces for the same services (`gen:working-directory-port` exists in `dsh-exec/ports` and `dsh-connect/ports`). Recommended default: keep the wrapper signatures of this document; when the coordinator gives each shared port one home, `dsh-context/ports` re-exports it and drops its own interface and the `dynamic-require` fallback.
 2. **Home of the zone reader.** `dsh-util` covers `packages/util/time`, which owns `canonicalizeTimeZone`, and `dsh-automation` needs zone offsets for schedules. Recommended default: if `dsh-util` exports `canonicalize-time-zone` and a zone offset procedure, `dsh-context/time-context` re-exports them and `private/tzif.rkt` is not written; otherwise implement rule 24 here and offer the module to `dsh-util`.
 3. **YAML scalar typing of frontmatter.** dsh parses SKILL.md frontmatter with the `yaml` package (YAML 1.2 core schema); `cordis-yaml` follows js-yaml. They agree on the scalars skill files use; they can differ on rare forms such as `0o17` or `~`. Recommended default: read with `cordis-yaml` using a schema argument that omits the `!!js` tag, treat any value that is not a string for `name` or `description` as a missing field, and add a test table of the boolean-like spellings.
 4. **Collation.** `locale-string<?` approximates ICU root collation for ASCII. It decides only which of two same-named skills inside one root wins and the order of roster ties and of names in one error message. Recommended default: rule 2 as written.

@@ -319,6 +319,24 @@
     (fiber-dispose! waits)
     (check-eq? (fiber-state slow-child) 'disposed)))
 
+(test-case "rule 3: a returned disposer is collected at once; awaiting it keeps the fiber loading"
+  ;; source: vendor/cordis/src/fiber.ts (_execute collects a function before it looks for a
+  ;; thenable); packages/preset/agent-preset/src/index.ts awaits the effect before yielding it
+  (with-root-context (ctx)
+    (define g (gate))
+    (define (slow-effect c) (ctx-effect c (lambda () (semaphore-peek-evt g)) #:label "slow"))
+    (define returns (ctx-plugin ctx (lambda (c config) (slow-effect c))))
+    (define awaits (ctx-plugin ctx (lambda (c config) (await (slow-effect c)))))
+    (await/t returns)
+    (check-eq? (fiber-state returns) 'active)
+    (check-equal? (labels returns) '("slow"))
+    (check-false (sync/timeout 0 (car (fiber-effects returns))))
+    (check-eq? (fiber-state awaits) 'loading)
+    (gate-open! g)
+    (await/t awaits)
+    (check-eq? (fiber-state awaits) 'active)
+    (check-equal? (labels awaits) '("slow"))))
+
 (test-case "rule 3: an invalid body result fails the fiber"
   (with-root-context (ctx)
     (define f (ctx-plugin ctx (lambda (c config) 42)))
@@ -381,6 +399,47 @@
     (check-equal? (fiber-effective-config f) 2))
   (check-equal? (notes) '(0 1 cleanup-1 2)))
 
+(test-case "rule 3: bodies and inverses inherit the parameterization of what triggered them"
+  ;; contract section 2 rule 9 for the kernel's own tasks
+  (define current-cause (make-parameter 'none))
+  (define-values (note notes) (make-recorder))
+  (with-root-context (ctx)
+    (define (reporting tag)
+      (lambda (c config)
+        (note (list tag 'body (current-cause)))
+        (lambda () (note (list tag 'inverse (current-cause))))))
+    (define cust (current-custodian))
+    (define consumer
+      (parameterize ([current-cause 'mounting-consumer])
+        (ctx-plugin ctx (make-plugin (reporting 'consumer) #:inject '(db)))))
+    (define plain
+      (parameterize ([current-cause 'mounting-plain])
+        (ctx-plugin ctx (lambda (c config)
+                          (note (list 'plain 'custodian-inherited? (eq? (current-custodian) cust)))
+                          ((reporting 'plain) c config)))))
+    (await/t plain)
+    ;; the consumer loads because the provider became active: that is its trigger
+    (define provider
+      (parameterize ([current-cause 'mounting-provider])
+        (ctx-plugin ctx (lambda (c config) (ctx-provide c 'db 1)))))
+    (await/t provider)
+    (await/t consumer)
+    (parameterize ([current-cause 'restarting])
+      (fiber-restart! plain))
+    (parameterize ([current-cause 'disposing])
+      (fiber-dispose! plain)
+      (fiber-dispose! provider))
+    (check-eq? (fiber-state consumer) 'pending))
+  (check-equal? (notes)
+                '((plain custodian-inherited? #f)
+                  (plain body mounting-plain)
+                  (consumer body mounting-provider)
+                  (plain inverse restarting)
+                  (plain custodian-inherited? #f)
+                  (plain body restarting)
+                  (plain inverse disposing)
+                  (consumer inverse disposing))))
+
 (test-case "rule 3 / law 14: each activation gets a fresh custodian, shut down at unload"
   (with-root-context (ctx)
     (define custodians '())
@@ -442,6 +501,28 @@
     (check-equal? (await/t restarter) 'saw-the-restart)
     (check-equal? activations 2)
     (check-eq? (fiber-state f) 'active)))
+
+(test-case "a task handed to the parent custodian by an unload can still be killed"
+  (with-root-context (ctx)
+    (define survivor #f)
+    (define parked (gate))
+    (define activations 0)
+    (define f (ctx-plugin ctx (lambda (c config)
+                                (set! activations (add1 activations))
+                                (when (= activations 1)
+                                  (set! survivor
+                                        (spawn-task (lambda ()
+                                                      (fiber-restart! (context-fiber c))
+                                                      (gate-open! parked)
+                                                      (await (make-semaphore 0))))))
+                                (void))))
+    (check-not-false (wait-for (lambda () survivor)))
+    (gate-wait parked)
+    ;; the custodian the task was spawned under is gone; the task is not
+    (check-false (task-done? survivor))
+    (check-equal? (task-kill! survivor) (void))
+    (await/t (wrap-evt survivor void))
+    (check-exn exn:fail:cordis:task-killed? (lambda () (task-result survivor)))))
 
 (test-case "a plugin body may dispose or restart its own fiber without waiting for itself"
   (define-values (note notes) (make-recorder))

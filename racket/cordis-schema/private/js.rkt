@@ -20,6 +20,7 @@
          plain-object?
          ->object
          js-string
+         prop:js-string
          js-json-value
          js-json-text
          json-absent?
@@ -29,6 +30,7 @@
          js-int32
          regexp-value?
          js-regexp
+         js-regexp-matches?
          js-regexp-source
          js-regexp-flags
          js-regexp-text
@@ -90,8 +92,14 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; String(v)
 
+;; A struct with this property is a JavaScript object with its own `toString`: the property
+;; value is a procedure from the struct to its string.
+(define-values (prop:js-string has-js-string? js-string-ref)
+  (make-struct-type-property 'js-string))
+
 (define (js-string v)
   (cond
+    [(has-js-string? v) ((js-string-ref v) v)]
     [(string? v) v]
     [(real? v) (js-number->string v)]
     [(eq? v #t) "true"]
@@ -226,17 +234,53 @@
 
 ;; What JavaScript's \s matches.
 (define js-space-chars
-  (string-append "\t\n\v\f\r    -     　﻿"))
+  (string-append "\t\n\v\f\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF"))
 
 (define (hex-char? c)
   (and (char? c) (or (char-numeric? c) (memv (char-downcase c) '(#\a #\b #\c #\d #\e #\f)))))
 
-;; js-regexp : string? string? -> regexp?
-;; A Racket regexp that matches what `new RegExp(source, flags).test(str)` accepts. Raises
-;; `exn:fail:contract` for flags JavaScript rejects and for a source that does not translate.
-(define (js-regexp source flags)
+;; Without the `u` or `v` flag a JavaScript regexp matches UTF-16 code units, so a character
+;; outside the Basic Multilingual Plane is two items to it. Racket matches whole characters.
+;; To keep JavaScript's counting, such a character is rewritten as two private-use characters,
+;; one per surrogate half, in the pattern and in the string it is tested against.
+
+(define (astral? c)
+  (> (char->integer c) #xFFFF))
+
+(define (high-half-char surrogate) (integer->char (+ #xF0000 (- surrogate #xD800))))
+(define (low-half-char surrogate) (integer->char (+ #xF0400 (- surrogate #xDC00))))
+
+;; The stand-ins for the two surrogate halves of an astral character.
+(define (unit-chars c)
+  (define offset (- (char->integer c) #x10000))
+  (list (high-half-char (+ #xD800 (arithmetic-shift offset -10)))
+        (low-half-char (+ #xDC00 (bitwise-and offset #x3FF)))))
+
+;; `str` with each astral character replaced by its two stand-ins.
+(define (unit-string str)
+  (if (for/or ([c (in-string str)]) (astral? c))
+      (list->string (append* (for/list ([c (in-string str)])
+                               (if (astral? c) (unit-chars c) (list c)))))
+      str))
+
+(define (unicode-flags? flags)
+  (regexp-match? #rx"[uv]" flags))
+
+;; js-regexp-matches? : string? string? string? -> boolean?
+;; `new RegExp(source, flags).test(str)`. Raises as `js-regexp` does.
+(define (js-regexp-matches? source flags str)
+  (regexp-match? (js-regexp source flags)
+                 (if (unicode-flags? flags) str (unit-string str))))
+
+;; js-regexp : string? string? #:units? boolean? -> regexp?
+;; A Racket regexp that matches what `new RegExp(source, flags)` matches. With `units?`, the
+;; default without the `u` and `v` flags, the regexp is for strings rewritten by `unit-string`;
+;; otherwise it is for ordinary strings and counts whole characters. Raises `exn:fail:contract`
+;; for flags JavaScript rejects and for a source that does not translate.
+(define (js-regexp source flags #:units? [units? (not (unicode-flags? flags))])
   (define normal-flags (js-regexp-flags flags))
   (define (flag? c) (and (memv c (string->list normal-flags)) #t))
+  (define unicode? (unicode-flags? normal-flags))
   (define length (string-length source))
   (define (peek i) (and (< i length) (string-ref source i)))
   (define (invalid why)
@@ -266,13 +310,22 @@
            [else (loop (+ i 1) #f names)])]
         [else (loop (+ i 1) #f names)])))
 
-  (define out (open-output-string))
-  (define (emit text) (write-string text out))
+  (define sink (open-output-string))
+  (define (emit text) (write-string text sink))
+  ;; The \p{...} items of the class being translated, most recent first.
+  (define class-properties '())
   ;; A literal character, escaped where the pregexp syntax gives it a meaning.
   (define (literal c in-class?)
-    (define special (if in-class? "\\]^-[" "\\.[]{}()*+?^$|"))
-    (when (for/or ([s (in-string special)]) (char=? s c)) (emit "\\"))
-    (emit (string c)))
+    (cond
+      [(and units? (astral? c))
+       (for ([unit (in-list (unit-chars c))])
+         (emit (string unit)))]
+      [else
+       (define special (if in-class? "\\]^-[" "\\.[]{}()*+?^$|"))
+       (when (for/or ([s (in-string special)]) (char=? s c)) (emit "\\"))
+       (emit (string c))]))
+  ;; What matches no string at all.
+  (define nothing "(?:(?!x)x)")
 
   ;; Translates the escape whose backslash is at `i`; returns the index after it.
   (define (escape i in-class?)
@@ -283,8 +336,26 @@
            (for/and ([d (in-string digits)]) (hex-char? d))
            (string->number digits 16)))
     (define (code-point n next)
-      (literal (integer->char n) in-class?)
-      next)
+      (cond
+        [(not (<= #xD800 n #xDFFF)) (literal (integer->char n) in-class?) next]
+        ;; A surrogate half written as an escape.
+        [units?
+         (emit (string (if (< n #xDC00) (high-half-char n) (low-half-char n))))
+         next]
+        [(and (< n #xDC00)
+              (eqv? (peek next) #\\)
+              (eqv? (peek (+ next 1)) #\u)
+              (hex (+ next 2) 4))
+         => (lambda (low)
+              (cond
+                [(<= #xDC00 low #xDFFF)
+                 (literal (integer->char (+ #x10000 (arithmetic-shift (- n #xD800) 10)
+                                            (- low #xDC00)))
+                          in-class?)
+                 (+ next 6)]
+                [else (unless in-class? (emit nothing)) next]))]
+        ;; A lone half matches nothing a Racket string can hold.
+        [else (unless in-class? (emit nothing)) next]))
     (case c
       [(#\d #\D #\w #\W) (emit (string #\\ c)) (+ i 2)]
       [(#\s) (emit (if in-class? js-space-chars (string-append "[" js-space-chars "]"))) (+ i 2)]
@@ -304,7 +375,7 @@
        (if n (code-point n (+ i 4)) (begin (literal #\x in-class?) (+ i 2)))]
       [(#\u)
        (cond
-         [(eqv? (peek (+ i 2)) #\{)
+         [(and unicode? (eqv? (peek (+ i 2)) #\{))
           (define close (or (find-char #\} (+ i 3)) (invalid "Invalid Unicode escape")))
           (define n (string->number (substring source (+ i 3) close) 16))
           (unless (and n (<= n #x10FFFF)) (invalid "Invalid Unicode escape"))
@@ -326,8 +397,12 @@
           (+ close 1)]
          [else (literal #\k in-class?) (+ i 2)])]
       [(#\p #\P)
-       (define close (and (eqv? (peek (+ i 2)) #\{) (find-char #\} (+ i 3))))
+       (define close (and unicode? (eqv? (peek (+ i 2)) #\{) (find-char #\} (+ i 3))))
        (cond
+         [(and close in-class?)
+          ;; The pregexp syntax has no property inside a class; `class` combines them.
+          (set! class-properties (cons (substring source i (+ close 1)) class-properties))
+          (+ close 1)]
          [close (emit (substring source i (+ close 1))) (+ close 1)]
          [else (literal c in-class?) (+ i 2)])]
       [else
@@ -345,14 +420,39 @@
        (emit (if negated? "(?s:.)" "(?:(?!x)x)"))
        (+ start 1)]
       [else
-       (emit (if negated? "[^" "["))
-       (let loop ([j start])
-         (define c (or (peek j) (invalid "Unterminated character class")))
-         (cond
-           [(char=? c #\]) (emit "]") (+ j 1)]
-           [(char=? c #\\) (loop (escape j #t))]
-           [(char=? c #\-) (emit "-") (loop (+ j 1))]
-           [else (literal c #t) (loop (+ j 1))]))]))
+       (define outer sink)
+       (set! sink (open-output-string))
+       (set! class-properties '())
+       (define end
+         (let loop ([j start])
+           (define c (or (peek j) (invalid "Unterminated character class")))
+           (cond
+             [(char=? c #\]) (+ j 1)]
+             [(char=? c #\\) (loop (escape j #t))]
+             [(char=? c #\-) (emit "-") (loop (+ j 1))]
+             [else (literal c #t) (loop (+ j 1))])))
+       (define body (get-output-string sink))
+       (define properties (reverse class-properties))
+       (set! sink outer)
+       (emit
+        (cond
+          [(null? properties) (string-append (if negated? "[^" "[") body "]")]
+          [negated?
+           (string-append "(?:"
+                          (apply string-append
+                                 (for/list ([property (in-list properties)])
+                                   (string-append "(?!" property ")")))
+                          (if (string=? body "") "(?s:.)" (string-append "[^" body "]"))
+                          ")")]
+          [else
+           (string-append "(?:"
+                          (string-join (append (if (string=? body "")
+                                                   '()
+                                                   (list (string-append "[" body "]")))
+                                               properties)
+                                       "|")
+                          ")")]))
+       end]))
 
   (let loop ([i 0])
     (define c (peek i))
@@ -361,7 +461,7 @@
         [(#\\) (loop (escape i #f))]
         [(#\[) (loop (class i))]
         [(#\.)
-         (emit (if (flag? #\s) "(?s:.)" "[^\n\r  ]"))
+         (emit (if (flag? #\s) "(?s:.)" "[^\n\r\u2028\u2029]"))
          (loop (+ i 1))]
         [(#\()
          (cond
@@ -377,9 +477,11 @@
            [quantifier (emit (car quantifier)) (loop (+ i (string-length (car quantifier))))]
            [else (emit "\\{") (loop (+ i 1))])]
         [(#\} #\]) (emit (string #\\ c)) (loop (+ i 1))]
-        [else (emit (string c)) (loop (+ i 1))])))
+        [else
+         (if (astral? c) (literal c #f) (emit (string c)))
+         (loop (+ i 1))])))
 
-  (define body (get-output-string out))
+  (define body (get-output-string sink))
   (define with-case (if (flag? #\i) (format "(?i:~a)" body) (format "(?:~a)" body)))
   (define with-lines (if (flag? #\m) (format "(?m:~a)" with-case) with-case))
   (define anchored (if (flag? #\y) (string-append "^" with-lines) with-lines))
@@ -412,7 +514,9 @@
   (define parts (regexp-match iso-pattern text))
   (and
    parts
-   (let* ([number (lambda (i default) (if (list-ref parts i) (string->number (list-ref parts i)) default))]
+   (let* ([number (lambda (i default)
+                    (define text (list-ref parts i))
+                    (if text (string->number text) default))]
           [year (number 1 0)]
           [month (number 2 1)]
           [day (number 3 1)]
@@ -421,7 +525,8 @@
           [second (number 6 0)]
           [fraction (list-ref parts 7)]
           [millis (if fraction
-                      (floor (* 1000 (/ (string->number fraction) (expt 10 (string-length fraction)))))
+                      (floor (* 1000 (/ (string->number fraction)
+                                        (expt 10 (string-length fraction)))))
                       0)]
           [zone (list-ref parts 8)]
           [has-time? (and (list-ref parts 4) #t)])

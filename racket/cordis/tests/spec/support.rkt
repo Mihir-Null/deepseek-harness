@@ -17,6 +17,7 @@
          with-root
          with-scheduler
          run-task
+         call-bounded
          make-gate gate-open! gate-wait
          make-recorder note! notes
          settle settle-all busy? yield-times yield-until
@@ -93,6 +94,23 @@
     (task-kill! t)
     (error 'run-task "task did not finish within ~a s" secs))
   (task-result t))
+
+;; Calls `thunk` on a plain thread, which is not a task, and returns its
+;; values or re-raises what it raised; raises if it does not return within
+;; `secs`. For operations that a test must make from outside every task.
+(define (call-bounded thunk #:timeout [secs spec-timeout])
+  (define outcome #f)
+  (define worker
+    (thread (lambda ()
+              (set! outcome
+                    (with-handlers ([(lambda (e) #t) (lambda (e) (cons 'raised e))])
+                      (call-with-values thunk (lambda vs (cons 'values vs))))))))
+  (unless (sync/timeout secs worker)
+    (kill-thread worker)
+    (error 'call-bounded "no result within ~a s" secs))
+  (if (eq? (car outcome) 'raised)
+      (raise (cdr outcome))
+      (apply values (cdr outcome))))
 
 ;; A recorder collects observations made inside plugin bodies, listeners and
 ;; inverses, where a failing check would be swallowed by kernel containment.

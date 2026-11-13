@@ -4,7 +4,6 @@
 ;; misspelled field in plugin code is an unbound identifier at compile time.
 
 (require (for-syntax racket/base
-                     racket/list
                      racket/syntax
                      syntax/parse)
          cordis-data

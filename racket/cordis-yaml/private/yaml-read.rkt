@@ -1147,8 +1147,10 @@
   (define nul-index
     (for/first ([c (in-string buffer)] [i (in-naturals)] #:when (char=? c #\nul)) i))
   (when nul-index
-    (set-st-position! s nul-index)
-    (throw-error s "null byte is not allowed in input"))
+    ;; js-yaml reports this error before it appends its terminator, so its snippet is cut from
+    ;; the text without the last character.
+    (raise-yaml-error "null byte is not allowed in input" source
+                      (substring buffer 0 (sub1 (string-length buffer))) nul-index 0 0))
   (let skip ()
     (when (char=? (cur s) #\space)
       (set-st-line-indent! s (add1 (st-line-indent s)))

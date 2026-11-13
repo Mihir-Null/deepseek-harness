@@ -9,10 +9,9 @@
 ;; leave it. The third value is what makes the port free of mutation.
 ;;
 ;; The one cache in a schema is the built schema of a `lazy` node. Nothing here checks argument
-;; types beyond what each comment states; `cordis-schema` (main.rkt) attaches the contracts.
+;; types beyond what each comment states; `private/api.rkt` attaches the contracts.
 
-(require racket/list
-         racket/string
+(require racket/string
          cordis-data
          "js.rkt"
          "../volatile.rkt")
@@ -81,6 +80,8 @@
     (define-values (value adapted data*)
       (resolve data self (make-resolve-options autofix? ignore path) #f))
     value)
+  ;; `String(schema)` is the type string.
+  #:property prop:js-string (lambda (s) (schema->string s))
   #:methods gen:custom-write
   [(define (write-proc s port mode)
      (write-string "#<schema " port)
@@ -184,10 +185,14 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Options and errors
 
-;; rpath is the path from the root, innermost key first. checked? records that volatile
-;; placement was validated for this top-level call. claims is the table of that call that
-;; `claim` fills, or #f before the call starts.
-(struct resolve-options (autofix? ignore rpath checked? claims))
+;; rpath is the path from the root, innermost key first, and depth its length beyond the
+;; caller's prefix. checked? records that volatile placement was validated for this top-level
+;; call. claims is the table of that call that `claim` fills, or #f before the call starts.
+(struct resolve-options (autofix? ignore rpath depth checked? claims))
+
+;; A schema that contains itself with a default on the cycle resolves without end. JavaScript
+;; stops such a call when its stack is full; this bound plays that part.
+(define max-depth 10000)
 
 (define (valid-path? path)
   (and (list? path)
@@ -195,13 +200,19 @@
          (or (symbol? segment) (string? segment) (exact-nonnegative-integer? segment)))))
 
 (define (make-resolve-options autofix? ignore path)
-  (resolve-options (and autofix? #t) ignore (reverse path) #f #f))
+  (resolve-options (and autofix? #t) ignore (reverse path) 0 #f #f))
 
 (define (resolve-options-path options)
   (reverse (resolve-options-rpath options)))
 
 (define (resolve-options-extend options key)
-  (struct-copy resolve-options options [rpath (cons key (resolve-options-rpath options))]))
+  (define depth (add1 (resolve-options-depth options)))
+  (when (> depth max-depth)
+    (raise (make-exn:fail "RangeError: Maximum call stack size exceeded"
+                          (current-continuation-marks))))
+  (struct-copy resolve-options options
+               [rpath (cons key (resolve-options-rpath options))]
+               [depth depth]))
 
 (struct exn:fail:schema exn:fail (path))
 
@@ -553,7 +564,7 @@
     (define flags
       (let ([flags (and (plain-object? pattern) (jref (->object pattern) 'flags (void)))])
         (if (string? flags) flags "")))
-    (unless (regexp-match? (js-regexp source flags) data)
+    (unless (js-regexp-matches? source flags data)
       (raise-schema-error
        (format "expect string to match regexp ~a" (js-regexp-text source flags))
        options)))

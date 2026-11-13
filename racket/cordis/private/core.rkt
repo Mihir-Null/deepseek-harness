@@ -68,7 +68,6 @@
    scheduler
    owns-scheduler?
    custodian            ; kernel custodian: transition tasks and, when owned, the manager
-   paramz               ; parameterization under which kernel tasks run
    [root-ctx #:mutable]
    [root-fiber #:mutable]
    realms               ; mutable hasheq: key -> root realm, assigned at first provide
@@ -428,20 +427,21 @@
 ;; ---------------------------------------------------------------------------------------
 ;; Kernel tasks and entry
 
-;; A task owned by the kernel custodian that runs under the parameterization captured when
-;; the root was created. A raised value is logged; the task itself always finishes normally.
+;; A task owned by the kernel custodian. Like every task it inherits the parameterization of
+;; the task that spawns it, so a parameter set around the call that triggers a transition, an
+;; unload or an asynchronous setup reaches the plugin body and the inverses that run because
+;; of it. Node's `AsyncLocalStorage` propagates the same way through the promises of the
+;; TypeScript kernel, and dsh relies on it (the agent registry's teardown reads the initiator
+;; that triggered it). A raised value is logged; the task itself always finishes normally.
 (define (spawn-kernel-task k thunk #:name [name 'kernel])
-  (call-with-parameterization
-   (kernel-paramz k)
-   (lambda ()
-     (parameterize ([current-custodian (kernel-custodian k)])
-       (spawn-task (lambda ()
-                     (with-handlers ([(lambda (e) #t)
-                                      (lambda (e)
-                                        (log-error-once k (format "kernel task ~a" name) e))])
-                       (thunk)))
-                   #:name name
-                   #:scheduler (kernel-scheduler k))))))
+  (parameterize ([current-custodian (kernel-custodian k)])
+    (spawn-task (lambda ()
+                  (with-handlers ([(lambda (e) #t)
+                                   (lambda (e)
+                                     (log-error-once k (format "kernel task ~a" name) e))])
+                    (thunk)))
+                #:name name
+                #:scheduler (kernel-scheduler k))))
 
 ;; Runs `thunk` in a task of the kernel's scheduler: directly when the caller is one.
 (define (call/kernel ctx thunk)
