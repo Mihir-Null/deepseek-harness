@@ -212,7 +212,7 @@ A fiber is an `evt`, ready when it has no transition in flight; its synchronizat
 8. `(ctx-on ctx 'internal/update listener)` without `#:global? #t` registers on `ctx`'s fiber only: it sees updates of that fiber alone.
 9. A failed fiber recovers only through `fiber-update!`.
 
-**Config schemas.** `config-schema` is `#f`, or a procedure `(-> any/c any/c)` that returns the validated value or raises, or a value with the struct property `prop:config-schema` whose value is such a procedure taking `(schema raw)`. Validation failures raise `exn:fail:cordis:validation` with an `issues` field, a list of `(cons path-list message)`; its message is `invalid config:` followed by one line per issue, `  - message (at a.b.c)`.
+**Config schemas.** `config-schema` is `#f`, or any value applicable to one argument (a procedure, or a struct with `prop:procedure` such as a `cordis-schema` schema) that returns the validated value or raises. Whatever it raises propagates unchanged and is what the fiber records as its error. The kernel itself offers `exn:fail:cordis:validation`, with an `issues` field (a list of `(cons path-list message)`) and the message `invalid config:` followed by one line per issue, `  - message (at a.b.c)`, plus the constructor helper `(raise-validation-error issues)`, for schemas that want the Cordis `ValidationError` text.
 
 ## 7. Events
 

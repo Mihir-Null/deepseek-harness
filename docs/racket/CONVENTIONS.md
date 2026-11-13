@@ -31,7 +31,7 @@ Every agent that writes code under `racket/` follows these rules. They are short
 ## Compatibility with dsh
 
 - Tool names, tool descriptions, JSON schemas, prompt text, event names, session-log field names, CLI flags, config keys and error strings that a model, a user or a file can observe are copied from the TypeScript source verbatim. Put a comment `; source: packages/<group>/<pkg>/src/<file>` next to each copied block.
-- JSON values are jsexprs: `hasheq` with symbol keys, lists, strings, numbers, booleans and `'null`. Where key order is observable (session logs, wire messages, model requests) build the value with the ordered-object helper from `dsh-util` and write it with that package's writer.
+- JSON values are jvalues from `cordis-data` (ADR 0006): `jobject`s that keep key order, lists, strings, numbers, booleans and `'null`. Read and write JSON text with `cordis-data`, never `racket/json`. Build objects with `jobject` or `jobj` in the key order dsh uses. Count lengths with the unit the dsh source uses (`utf16-length`, `utf8-length` or `code-point-length`).
 - Anything model-visible must be reconstructable from the session log. A new model-visible input needs a session event.
 - A Racket-only extension uses the config key namespace `x-racket` or a plugin name starting with `racket:` and is recorded in an ADR. It must not change behaviour of an unmodified dsh configuration.
 
