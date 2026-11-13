@@ -41,6 +41,7 @@ A *scheduler* owns one baton. A *task* is a Racket thread that runs only while i
 (await/timeout secs x [on-timeout (lambda () #f)]) -> any
 (await-all xs) -> list?                      ; results in order; raises the first exception after all settle
 (yield-task) -> void?                        ; go to the back of the queue
+(task-check-break) -> void?                  ; raise a pending break now, if any
 (task-sleep secs) -> void?
 (blocking thunk) -> any                      ; run thunk on a plain thread outside the baton, await it
 (call-in-kernel thunk #:scheduler [s (current-scheduler)]) -> any
@@ -51,7 +52,7 @@ Rules:
 1. At most one task per scheduler runs at any time. A running task is never descheduled in favour of another task of the same scheduler except inside `await`, `await-all`, `yield-task`, `task-sleep`, `blocking`, `task-result` on an unfinished task, or by finishing.
 2. Tasks start in spawn order: `spawn-task` enqueues the new task's baton request *before it returns*, in the spawner's thread. Tasks waiting to resume after an `await` queue behind tasks already waiting, in the order their events became ready.
 3. `(await x)`: if `x` is a task, wait for it and return `(task-result x)`; if `x` is a fiber, behave as `fiber-await`; otherwise `x` must be an `evt` and the result is its synchronization result. While waiting the baton is released. `await` returns, or raises, only after the baton is reacquired.
-4. A break delivered to a task while it waits in `await` is raised as `exn:break` from `await` after the baton is reacquired. A break delivered while the task runs is raised at the next point where breaks are enabled, as usual.
+4. Breaks are disabled while a task holds the baton and enabled only while it waits inside `await` (and the other release points of rule 1). A break delivered to a waiting task is raised as `exn:break` from `await` after the baton is reacquired. A break delivered while the task runs stays pending and is raised at its next release point. Cancellation is therefore cooperative, as with an `AbortSignal`: kernel and plugin code between two awaits is never interrupted. A task that never reaches a release point can only be stopped with `task-kill!`. Code that wants a cancellation point without waiting calls `(task-check-break)`, which raises a pending break.
 5. `await` outside a task (`(in-task?)` is `#f`) degrades to plain `sync` semantics with the same task and fiber cases; it never touches the baton.
 6. `blocking` propagates the thunk's values or exception. If the awaiting task is broken, the helper thread is broken too and then killed if it has not finished within 1 second.
 7. `call-in-kernel` from a non-task thread spawns a task for the thunk, waits with `sync`, and returns `task-result`; from inside a task of the same scheduler it just calls the thunk.

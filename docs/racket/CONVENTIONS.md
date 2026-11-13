@@ -24,7 +24,7 @@ Every agent that writes code under `racket/` follows these rules. They are short
 - Every registration is an effect: it goes through `ctx-effect`, `ctx-on`, `ctx-provide`, or a service procedure that does so on the caller's context, and it returns its disposer.
 - Ownership follows the first argument (ADR 0003): a service procedure takes a context or a service handle, and registers on `(use-context x)`.
 - Harness state is touched only from tasks. Anything that waits uses `await`; pure I/O that touches no harness state may run under `blocking`. Never call `sleep`, `sync`, `thread-wait`, blocking port reads or `subprocess-wait` directly from a task.
-- Cancellation is a break. Code that must clean up uses `dynamic-wind` or `with-handlers` for `exn:break?` and re-raises.
+- Cancellation is a break, delivered only at `await` points (breaks are disabled while a task runs). Code that must clean up uses `dynamic-wind` or `with-handlers` for `exn:break?` and re-raises. Long computations call `task-check-break` at safe points.
 - No module-level mutable state that outlives a context. State hangs off a service value created in a plugin body.
 - Waterfall listeners call `next` to delegate; returning without calling it short-circuits on purpose.
 
@@ -44,6 +44,8 @@ Every agent that writes code under `racket/` follows these rules. They are short
 ## Tests
 
 - Tests use `rackunit` and live in `tests/` as `*-test.rkt`. `raco test <package-dir>` must pass with no network and no API key.
+- Stale bytecode gives false results: the default load handler does not recompile a `.zo` whose dependency changed. Run `raco make` over the package's modules and tests (and over any package you depend on that changed) before `raco test`, or use `make -C racket test`, which does both.
+- `docs/racket/recon/20-racket-mechanisms.md` records what was observed about Racket 9.3 on this machine (custodians, breaks, subprocess groups, HTTP and TLS, PTY and zstd through the FFI, `racket/rerequire`, `web-server` streaming). Read the relevant section before using one of those mechanisms.
 - Tests never depend on timing. Sequence tasks with events, channels or `wait-for` from `cordis/testing`. Every wait in a test has a timeout.
 - A registration test disposes the fiber and observes the removal.
 - Each test file leaves no files outside a temporary directory it created, no threads, and no listening ports.
