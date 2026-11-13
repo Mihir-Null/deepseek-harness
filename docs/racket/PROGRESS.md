@@ -33,3 +33,11 @@ Newest entries last. Each entry says what was done and what comes next. Re-read 
 
 - Launched the kernel build workflow: implementation and an independent black-box spec suite in parallel, integration, declaration macros and `#lang cordis/plugin`, three adversarial reviewers, fix pass.
 - Next: while it runs, fix the harness package layout and write the cross-package architecture document; then the loader stack.
+
+## Stage 0 closed
+
+- All 20 reconnaissance notes are written (about 290k words). Their summaries, risks and gaps are in the workflow journals; the load-bearing findings are folded into `ARCHITECTURE.md`, the ADRs and the contracts.
+- Late findings from `recon/20-racket-mechanisms.md` that changed contracts: breaks are safe only at `await` points (kernel contract rule 2.4 now says breaks are disabled while a task runs); stale `.zo` files give false test passes (`raco make` before `raco test`); `net/http-client` streaming cannot be cancelled and does not verify TLS by default, so model adapters own their socket; `libzstd.so.1` is present for the FFI; a PTY needs about 30 lines of FFI over `openpty`.
+- Wrote `ARCHITECTURE.md` (26 Racket packages in 6 waves), ADRs 0006 to 0010, and the `cordis-data` contract.
+- Running at the time of this entry: the kernel build workflow, the wave 2 foundations workflow (`cordis-data`, then `cordis-schema`, `cordis-yaml`, `dsh-util`), and the wave 3 contract design workflow.
+- Next: when the kernel is green, write the `cordis-loader` contract and build it; when wave 3 contracts pass their consistency review, build wave 3 and run the first end-to-end scripted session.

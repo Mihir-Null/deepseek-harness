@@ -21,10 +21,10 @@ This file is the stage plan and status for rebuilding DeepSeek Harness (dsh) as 
 
 | # | Stage | Output | Status |
 |---|---|---|---|
-| 0 | Reconnaissance | `docs/racket/recon/*.md`, package inventory | 16 of 20 notes done |
+| 0 | Reconnaissance | `docs/racket/recon/*.md`, package inventory | done (20 notes) |
 | 1 | Cordis analysis and ADRs | `docs/racket/cordis-analysis.md`, `docs/adr/` | done (kept current) |
 | 2 | Racket Cordis kernel | `racket/cordis/` with its own test suite | in progress |
-| 3 | Harness, layer by layer | `racket/dsh-*/` | pending |
+| 3 | Harness, layer by layer | `racket/dsh-*/` (waves 2 to 5 of `ARCHITECTURE.md`) | wave 2 building, wave 3 contracts in design |
 | 4 | Interfaces | CLI, browser UI, Python SDK | pending |
 | 5 | Plugin porter | `SKILL.md`, porter tools, porter report | pending |
 | 6 | Independent verification | review reports, `PARITY.md`, final report | pending |
@@ -44,8 +44,30 @@ This file is the stage plan and status for rebuilding DeepSeek Harness (dsh) as 
 
 ## Stage detail
 
-Stage detail is filled in as each stage starts; see PROGRESS.md for the running log.
+The package list, dependency order and cross-package conventions are in [ARCHITECTURE.md](ARCHITECTURE.md); coding rules in [CONVENTIONS.md](CONVENTIONS.md); per-package interfaces in `contracts/`.
 
-### Stage 0: reconnaissance
+### How each wave runs
 
-Parallel research agents write one note per area under `docs/racket/recon/`. `docs/racket/recon/packages.json` is the generated inventory of the 379 dsh packages at the pinned commit.
+1. Architect agents write the wave's interface contracts from the reconnaissance notes and the code that already exists. A consistency reviewer cross-checks them (`contracts/WAVE<n>.md`).
+2. One implementation agent per package (or per work unit of a large package) builds from its contract, with tests.
+3. A reviewer who did not see the implementation checks each package against the TypeScript originals, differential-tests where possible, and fixes what it finds.
+4. The coordinator runs `make -C racket test`, updates PLAN.md, PROGRESS.md and PARITY.md, commits and pushes.
+
+### Wave status
+
+| Wave | Packages | Contracts | Built | Reviewed |
+|---|---|---|---|---|
+| 1 | `cordis` | done | in progress | pending |
+| 2 | `cordis-data`, `cordis-schema`, `cordis-yaml`, `dsh-util` | `cordis-data` done; others written by their implementers | in progress | pending |
+| 2 | `cordis-loader` | pending (needs kernel) | pending | pending |
+| 3 | `dsh-session`, `dsh-llm`, `dsh-tools`, `dsh-agent`, `dsh-test-support` | in progress | pending | pending |
+| 4 | `dsh-session-store`, `dsh-exec`, `dsh-fs`, `dsh-interaction`, `dsh-automation`, `dsh-context`, `dsh-subagent`, `dsh-connect`, `dsh-platform`, `dsh-ptc` | pending | pending | pending |
+| 5 | `dsh-boot`, `dsh-sdk`, `dsh-web`, `dsh-experimental` | pending | pending | pending |
+| 6 | `dsh-js`, `dsh-porter` | pending | pending | pending |
+
+### Things to remember across waves
+
+- Workflow scripts are saved under the session's `workflows/scripts/` directory; a finished workflow's per-agent results are in its `journal.jsonl`.
+- Third-party plugin tarballs fetched during reconnaissance are in the session scratchpad under `third-party/` (not committed): `@mem0/deepseek-plugin` 0.3.2, `@braintrust/deepseek-harness` 1.0.0, and others listed in `recon/17-plugin-authoring-surface.md`.
+- The Stone library the brief mentions is the Racket package `Stone` (codeberg `Trevoke/stone`), a DAG-based agent harness; `recon/20-racket-mechanisms.md` lists the techniques worth borrowing (owning the HTTP socket for streaming, cooperative cancellation, scripted model mocks).
+- Decisions still to record as ADRs when their wave starts: PTC hosting (native Racket evaluator plus Node runner), Typed Racket use, the porter's translation pipeline and the `dsh-js` language, sandboxed plugin loading, the session-event declaration form, the tool declaration form.
