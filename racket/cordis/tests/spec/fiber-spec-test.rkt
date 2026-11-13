@@ -202,7 +202,9 @@
     (settle f)
     (check-false (fiber-committed f))))
 
-;; source: contract 6, "Plugin body": arguments, current-context, custodian
+;; source: contract 6, "Plugin body": arguments, current-context, custodian;
+;; contract 2 rule 9, "Inside a task (current-scheduler) is the scheduler the
+;; task belongs to" (the body runs in a task the kernel created)
 (test-case "fiber/body: runs with its context, validated config and the fiber's custodian"
   (with-root (ctx)
     (define seen (box #f))
@@ -212,11 +214,13 @@
                                                  config
                                                  (eq? (current-custodian)
                                                       (fiber-custodian (context-fiber c)))
-                                                 (in-task? (context-scheduler c))))
+                                                 (in-task? (context-scheduler c))
+                                                 (eq? (current-scheduler)
+                                                      (context-scheduler c))))
                             (void))
                           'the-config))
     (await f)
-    (check-equal? (unbox seen) '(#t the-config #t #t))
+    (check-equal? (unbox seen) '(#t the-config #t #t #t))
     (check-eq? (context-fiber (fiber-context f)) f)))
 
 ;; source: contract 6, "Plugin body": "the fiber stays 'loading until it
@@ -284,14 +288,20 @@
     (check-equal? attempts 2)
     (check-equal? (drop (notes status) 3) '((failed . loading) (loading . active)))))
 
-;; source: contract 6, fiber-error "(or/c exn? any/c #f)"; recon 01 "a thrown
-;; non-error value" (the contract keeps the raised value instead of wrapping it)
+;; source: contract 6 rule 3, "A raised value that is not an exception is first
+;; wrapped in an exn:fail:cordis whose message is the value's display form";
+;; utils.ts handleError (`new Error(reason)`); recon 01 "a thrown non-error
+;; value is wrapped"
 (test-case "fiber rule 3: a body that raises a non-exception value fails the fiber"
   (with-root (ctx)
     (define f (ctx-plugin ctx (lambda (c config) (raise 'not-an-exception))))
     (settle f)
     (check-eq? (fiber-state f) 'failed)
-    (check-true (and (fiber-error f) #t))))
+    (define e (fiber-error f))
+    (check-pred exn:fail:cordis? e)
+    (check-equal? (exn-message e) "not-an-exception")
+    ;; fiber-await raises the recorded exception, not the raw value.
+    (check-eq? (with-handlers ([(lambda (v) #t) values]) (fiber-await f) 'returned) e)))
 
 ;; source: contract 6 rule 9; digest law 32 (not retried by notifications)
 (test-case "fiber rule 9: a failed fiber is not retried by dependency notifications"
@@ -738,13 +748,12 @@
     (check-equal? (exn:fail:cordis:validation-issues e) issues)
     (check-equal? (exn-message e)
                   "invalid config:\n  - expected a number (at server.port)\n  - required (at name)")
-    ;; fiber.ts prints an issue that has no path without the "(at ...)" part;
-    ;; the contract does not say how a path-less issue is written, so only the
-    ;; start of its line is checked.
+    ;; fiber.ts prints an issue that has no path without the "(at ...)" part,
+    ;; and the contract writes an issue with an empty path the same way.
     (define pathless
       (with-handlers ([exn:fail? values]) (raise-validation-error (list (cons '() "bad value")))))
     (check-pred exn:fail:cordis:validation? pathless)
-    (check-regexp-match #rx"^invalid config:\n  - bad value" (exn-message pathless))
+    (check-equal? (exn-message pathless) "invalid config:\n  - bad value")
     ;; A schema that uses the helper fails its fiber with that exception.
     (with-root (ctx)
       (define (schema raw)
@@ -931,17 +940,17 @@
 
 ;; source: recon 01 S27, reduced to what contract 8 keeps of the Logger service:
 ;; "(ctx-logger ctx [topic #f]) -> logger? ; child of the 'cordis logger, named
-;; after the fiber". logger.ts derives the default name with hyphenate, so
-;; "LoggingPlugin" and "logging-plugin" are both accepted.
+;; `topic` or the hyphenated fiber name"; logger.ts derives the default name
+;; with hyphenate.
 (test-case "S27 (reduced): ctx-logger is a child of the cordis logger named after the fiber"
   (with-root (ctx)
     (define f (ctx-plugin ctx (named "LoggingPlugin" (lambda (c config) (void)))))
     (await f)
     (define logger (ctx-logger (fiber-context f)))
     (check-true (logger? logger))
-    (check-regexp-match #rx"^(?i:logging-?plugin)$" (format "~a" (logger-name logger)))
-    (check-true (logger? (ctx-logger ctx)))
-    (check-true (logger? (ctx-logger ctx 'spec-topic)))
+    (check-eq? (logger-name logger) 'logging-plugin)
+    (check-eq? (logger-name (ctx-logger ctx)) 'root)
+    (check-eq? (logger-name (ctx-logger ctx 'spec-topic)) 'spec-topic)
     ;; An event logged through it reaches a receiver on the cordis logger.
     (define receiver (make-log-receiver cordis-logger 'info))
     (log-message logger 'info "hello from the plugin" 'payload)

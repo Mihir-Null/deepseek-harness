@@ -25,8 +25,7 @@
          raises?
          labels-of
          comparable
-         optional-binding
-         unset?)
+         optional-binding)
 
 ;; Upper bound in seconds for one test body.
 (define spec-timeout 30)
@@ -192,8 +191,3 @@
 ;; export it, so that one missing name fails one test case, not a file.
 (define (optional-binding mod name)
   (dynamic-require mod name (lambda () #f)))
-
-;; The contract does not say whether an unset optional value reads as #f or
-;; void; both are accepted where TypeScript has `undefined`.
-(define (unset? v)
-  (or (not v) (void? v)))

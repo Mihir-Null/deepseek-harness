@@ -90,6 +90,60 @@
     (d)
     (check-equal? (notes log) '(inverse))))
 
+;; source: contract 4, effect results "a fiber: no inverse, and it is not
+;; awaited. The fiber is already owned through its ctx.plugin() effect, so a
+;; thunk or a plugin body may end with a ctx-plugin call"; contract 12
+;; addendum 5
+(test-case "effect/result: a fiber adds no inverse and is not awaited"
+  (with-root (ctx)
+    (define gate (make-gate))
+    (define child (box #f))
+    (define d
+      (ctx-effect ctx (lambda ()
+                        (set-box! child (ctx-plugin ctx (lambda (c config)
+                                                          (gate-wait gate)
+                                                          (void))))
+                        (unbox child))))
+    ;; Setup has settled although the child is still loading.
+    (check-eq? (sync/timeout 0 d) d)
+    (check-equal? (disposer-children d) '())
+    (check-eq? (fiber-state (unbox child)) 'loading)
+    ;; Disposing the effect leaves the child to its own ctx.plugin() effect.
+    (d)
+    (check-true (and (fiber-uid (unbox child)) #t))
+    (gate-open! gate)
+    (await (unbox child))
+    (check-eq? (fiber-state (unbox child)) 'active)
+    ;; A plugin body that ends with ctx-plugin becomes active without its child.
+    (define inner-gate (make-gate))
+    (define inner (box #f))
+    (define parent
+      (ctx-plugin ctx (lambda (c config)
+                        (set-box! inner (ctx-plugin c (lambda (cc config)
+                                                        (gate-wait inner-gate)
+                                                        (void))))
+                        (unbox inner))))
+    (await parent)
+    (check-eq? (fiber-state parent) 'active)
+    (check-eq? (fiber-state (unbox inner)) 'loading)
+    (gate-open! inner-gate)
+    (await (unbox inner))
+    (check-eq? (fiber-state (unbox inner)) 'active)))
+
+;; source: contract 4, effect results "a synchronization result that is the
+;; evt itself (a thread, a semaphore) adds nothing"
+(test-case "effect/result: an evt that is its own result adds nothing"
+  (with-root (ctx)
+    (define sem (make-semaphore 1))
+    (define peek (ctx-effect ctx (lambda () (semaphore-peek-evt sem))))
+    (await peek)
+    (check-equal? (disposer-children peek) '())
+    (define threaded (ctx-effect ctx (lambda () (thread void))))
+    (await threaded)
+    (peek)
+    (threaded)
+    (check-equal? (labels-of (context-fiber ctx)) '())))
+
 ;; source: contract 4, "Anything else raises exn:fail:contract (invalid effect)";
 ;; recon 01 Formats: TypeError "Invalid effect"
 (test-case "effect/result: anything else raises exn:fail:contract"
@@ -146,7 +200,9 @@
     (dispose! d1)
     (check-equal? (labels-of rf) before)))
 
-;; source: contract 4, "(effect ctx maybe-label body ...+) ; label defaults to file:line:col"
+;; source: contract 4, "(effect ctx maybe-label body ...+) ; macro; maybe-label
+;; is #:label label-expr or a string literal, else the label is file:line:col
+;; of the form"
 (test-case "effect/macro: the effect form wraps its body and labels it by source location"
   (with-root (ctx)
     (define log (make-recorder))
@@ -156,7 +212,12 @@
     (check-true (disposer? d))
     (check-regexp-match #rx"effect-spec-test[.]rkt:[0-9]+:[0-9]+$" (disposer-label d))
     (d)
-    (check-equal? (notes log) '(setup inverse))))
+    (check-equal? (notes log) '(setup inverse))
+    (define computed (effect ctx #:label (string-append "computed-" "label") (void)))
+    (check-equal? (disposer-label computed) "computed-label")
+    (define literal (effect ctx "literal label" (note! log 'labelled) (void)))
+    (check-equal? (disposer-label literal) "literal label")
+    (check-equal? (notes log) '(setup inverse labelled))))
 
 ;; source: contract 4 rule 1 (disposed fiber); recon 01 S19
 (test-case "effect rule 1: ctx-effect on a disposed fiber raises exn:fail:cordis:inactive"

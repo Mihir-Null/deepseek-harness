@@ -5092,7 +5092,7 @@
   ("process.getBuiltinModule('node:path').join(process.cwd(), 'approved.txt')" headless-win32 corpus (ok "C:\u005cwork\u005cproject\u005capproved.txt"))
   ("process.getBuiltinModule('node:path').join(process.cwd(), 'broken-skills')" headless-win32 corpus (ok "C:\u005cwork\u005cproject\u005cbroken-skills"))
   ("process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('@deepseek-ai/dsh-agent-preset/package.json')), 'skills')" headless-win32 corpus (ok "C:\u005cdsh\u005cnode_modules\u005c@deepseek-ai\u005cdsh-agent-preset\u005cskills"))
-  ("process.getBuiltinModule('node:path').resolve(process.env.DSH_PRIMARY_RUNTIME ?? '')" headless-win32 corpus (ok "\u005ctmp\u005cclaude-0\u005c-home-user-deepseek-harness\u005c9cf9e918-0d06-54f4-bb27-425975c383f7\u005cscratchpad\u005ccy"))
+  ("process.getBuiltinModule('node:path').resolve(process.env.DSH_PRIMARY_RUNTIME ?? '')" headless-win32 corpus (ok "C:\u005cwork\u005cproject"))
   ("process.platform !== 'darwin'" headless-win32 corpus (ok #t))
   ("process.platform !== 'win32'" headless-win32 corpus (ok #f))
   ("process.platform === 'win32'" headless-win32 corpus (ok #t))

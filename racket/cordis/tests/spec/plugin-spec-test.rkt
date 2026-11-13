@@ -44,14 +44,15 @@
   (check-true (procedure? plugin-info) "cordis/plugin must export plugin-info")
   (when (procedure? plugin-info)
     (define info (plugin-info spec-greeter))
-    ;; The contract names the keys of the hash, not the form of an inject
-    ;; entry: a list of keys and a hash keyed by them are both accepted.
-    (define (keys-of v) (if (hash? v) (hash-keys v) v))
     (check-equal? (hash-ref info 'name) "spec-greeter")
-    (check-equal? (keys-of (hash-ref info 'inject)) '(spec-tools))
-    (check-equal? (keys-of (hash-ref info 'optional)) '(spec-approval))
+    (check-equal? (hash-ref info 'inject) '(spec-tools))
+    (check-equal? (hash-ref info 'optional) '(spec-approval))
     (check-equal? (hash-ref info 'provides) '(spec-greeting))
-    (check-false (hash-ref info 'config-schema))))
+    (check-false (hash-ref info 'config-schema))
+    ;; A plugin made by make-plugin has no optional keys.
+    (define made (make-plugin (lambda (ctx config) (void)) #:inject '(spec-tools)))
+    (check-equal? (hash-ref (plugin-info made) 'inject) '(spec-tools))
+    (check-equal? (hash-ref (plugin-info made) 'optional) '())))
 
 ;; source: contract 9, "each required injected key is bound as a variable
 ;; holding (service-handle ctx 'key). An #:optional key is not part of the

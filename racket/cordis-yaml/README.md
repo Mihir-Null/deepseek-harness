@@ -95,7 +95,7 @@ The suite needs neither Node nor a network.
 - `tests/js-yaml-table-test.rkt` compares the package with [tests/data/js-yaml-table.rktd](tests/data/js-yaml-table.rktd), a table of results from js-yaml 4.3.2 and Node 22: about 1,300 YAML texts with js-yaml's value or its error reason, position and message; about 2,500 values with js-yaml's dump text; about 2,850 expressions with the value or error name Node computed under four environments; texts Node rejects as `SyntaxError`; and JavaScript that must be reported as unsupported.
 - The other test files pin each rule of the contract by hand: scalar resolution, quoting, block scalars, error positions, each language construct, each coercion, host objects and the `process` object.
 
-Regenerate the table after changing the generator. js-yaml is taken from a scratch directory, because the repository has no `node_modules`; the seed is fixed, so the same Node version writes the same file:
+Regenerate the table after changing the generator. js-yaml is taken from a scratch directory, because the repository has no `node_modules`; the seed is fixed, so the same Node installation writes the same file:
 
 ```sh
 mkdir /tmp/js-yaml && (cd /tmp/js-yaml && npm install js-yaml@4.3.2)

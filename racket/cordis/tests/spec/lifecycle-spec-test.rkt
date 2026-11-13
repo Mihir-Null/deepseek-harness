@@ -262,26 +262,23 @@
     (check-true loading-cleanup?)))
 
 ;; source: cordis-lifecycle.spec.ts "resolves dependencies that
-;; internal/plugin adds before child activation" (recon case 15). The contract
-;; names no mutator for a fiber's inject table; the port writes to the table
-;; that fiber-inject returns, which is what `fiber.inject[name] = {}` does.
+;; internal/plugin adds before child activation" (recon case 15); contract 6
+;; rule 1, "An observer of that emit may add a dependency with
+;; (hash-set! (fiber-inject f) name config)", which is `fiber.inject[name] = {}`.
 (test-case "case 15: dependencies added by an internal/plugin observer are honoured"
   (with-root (ctx)
     (ctx-provide ctx 'late-inject (hasheq))
     (define apply-calls 0)
-    (define mutable-table? (box 'not-observed))
+    (define observed? (box #f))
     (ctx-on ctx 'internal/plugin
             (lambda (fiber)
               (when (and (equal? (fiber-name fiber) "loader-shaped") (fiber-uid fiber))
-                (define table (fiber-inject fiber))
-                (set-box! mutable-table? (not (immutable? table)))
-                (unless (immutable? table)
-                  (hash-set! table 'late-inject (hasheq))))))
+                (set-box! observed? #t)
+                (hash-set! (fiber-inject fiber) 'late-inject (hasheq)))))
     (define f
       (ctx-plugin ctx (make-plugin (lambda (c config) (set! apply-calls (add1 apply-calls)) (void))
                                    #:name "loader-shaped")))
-    (check-eq? (unbox mutable-table?) #t
-               "fiber-inject must return the fiber's mutable inject table to observers")
+    (check-true (unbox observed?))
     (await f)
     (check-equal? apply-calls 1)
     (check-eq? (fiber-state f) 'active)
@@ -490,7 +487,7 @@
     (define raw (hasheq 'value 2))
     (fiber-update! f raw)
     (check-eq? (fiber-config f) raw)
-    (check-pred unset? (fiber-effective-config f))
+    (check-false (fiber-effective-config f))
     (check-eq? (fiber-state f) 'pending)
     (ctx-provide ctx 'config-access-test (hasheq))
     (await f)

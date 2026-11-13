@@ -19,7 +19,8 @@
 // without the code under test: an object is a list of (key . value) pairs in JavaScript's
 // enumeration order, an array is a vector, null and undefined are the symbols of those names,
 // an expression node is (js "source"), a URL is (url "href"), a function is (function).
-// The same seed gives the same file on the same Node version and platform.
+// The same seed gives the same file on the same Node installation, whatever the directory the
+// generator is started from: the table records the path of the node executable.
 
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -100,9 +101,9 @@ function makeCtx(desc) {
   ctx.scratch = 0
   if (desc.mode === 'shadow') {
     const realModule = process.getBuiltinModule('node:module')
-    const pathModule = desc.platform === 'win32'
-      ? win32
-      : { ...posix, resolve: (...parts) => posix.resolve(desc.cwd, ...parts) }
+    // `resolve` starts from the described directory, not from the generator's own.
+    const flavor = desc.platform === 'win32' ? win32 : posix
+    const pathModule = { ...flavor, resolve: (...parts) => flavor.resolve(desc.cwd, ...parts) }
     ctx.process = {
       env: { ...desc.env },
       platform: desc.platform,

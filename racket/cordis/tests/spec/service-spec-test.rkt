@@ -169,6 +169,53 @@
     (check-eq? (exn:fail:cordis:service-key e) 'svc)
     (check-eq? (ctx-get ctx 'svc) 'v1)))
 
+;; source: contract 5, ctx-set! bullet ("For an accessor name it calls the
+;; accessor's setter and raises exn:fail:cordis:service when the accessor has
+;; none") and accessor bullet ("setter as (setter ctx value) with the writing
+;; context"); reflect.ts handler.set
+(test-case "service/set: an accessor name goes to its setter with the writing context"
+  (with-root (ctx)
+    (define cell (box 'initial))
+    (define writers (make-recorder))
+    (ctx-accessor ctx 'spec-cell
+                  #:get (lambda (c) (unbox cell))
+                  #:set (lambda (c v) (note! writers c) (set-box! cell v)))
+    (define writer (context-extend ctx (hasheq 'who 'writer)))
+    (ctx-set! writer 'spec-cell 'written)
+    (check-eq? (ctx-ref ctx 'spec-cell) 'written)
+    (check-equal? (length (notes writers)) 1)
+    (check-eq? (first (notes writers)) writer)
+    ;; An accessor without a setter cannot be written.
+    (ctx-accessor ctx 'spec-read-only #:get (lambda (c) 'fixed))
+    (check-exn exn:fail:cordis:service? (lambda () (ctx-set! ctx 'spec-read-only 'other)))
+    (check-eq? (ctx-ref ctx 'spec-read-only) 'fixed)))
+
+;; source: contract 5, ctx-set! bullet ("For a service name it runs the
+;; 'internal/set waterfall (ctx name value next) whose innermost step replaces
+;; the impl's value in place"); contract 7, internal events; reflect.ts
+;; handler.set
+(test-case "service/set: a service name runs the internal/set waterfall around the replacement"
+  (with-root (ctx)
+    (define log (make-recorder))
+    (ctx-provide ctx 'svc 'v0)
+    (define d
+      (ctx-on ctx 'internal/set
+              (lambda (c name value next)
+                (note! log (list 'before (eq? c ctx) name value (ctx-get ctx 'svc)))
+                (next)
+                (note! log (list 'after (ctx-get ctx 'svc))))))
+    (ctx-set! ctx 'svc 'v1)
+    (check-equal? (notes log) '((before #t svc v1 v0) (after v1)))
+    (d)
+    ;; A listener that returns without calling next vetoes the write.
+    (ctx-on ctx 'internal/set (lambda (c name value next) 'vetoed))
+    (ctx-set! ctx 'svc 'v2)
+    (check-eq? (ctx-get ctx 'svc) 'v1)
+    ;; A name that was never provided fails before the waterfall runs.
+    (check-exn (raises? exn:fail:cordis:service?
+                        #rx"cannot set property \"never-provided\" without provide")
+               (lambda () (ctx-set! ctx 'never-provided 1)))))
+
 ;; source: contract 5, ctx-ref step 1; recon 01 S15 (accessor get runs with the
 ;; reading context)
 (test-case "service/ref step 1: an accessor's getter is called with the reading context"
@@ -430,6 +477,35 @@
       (parameterize ([resolver (lambda (value name) (list 'resolved value name))])
         (ctx-mixin ctx 'device '(power))
         (check-equal? (ctx-ref ctx 'power) (list 'resolved service 'power))))))
+
+;; source: contract 5, mixin bullet ("The member is read through (ctx-ref ctx
+;; source) on the reading context, so a mixed-in name needs the access rights
+;; of its source"; "ctx-set! on a mixed-in name stores the member in a mutable
+;; hash-valued service"); recon 01 quirk 12 and S16
+(test-case "service/mixin: a member needs its source's access rights; a write reaches the source"
+  (with-root (ctx)
+    (define timer (make-hasheq (list (cons 'now 12))))
+    (ctx-provide ctx 'timer timer)
+    (ctx-mixin ctx 'timer '(now))
+    ;; A plugin under the root may read a root-provided service, so it reads the member.
+    (define near (ctx-plugin ctx (lambda (c config) (void))))
+    (await near)
+    (check-equal? (ctx-ref (fiber-context near) 'now) 12)
+    ;; A plugin whose context maps `timer` to another realm cannot read the source.
+    (define far (ctx-plugin (context-isolate ctx 'timer) (lambda (c config) (void))))
+    (await far)
+    (check-exn (raises? exn:fail:cordis:inject?
+                        #rx"cannot get property \"timer\" without inject")
+               (lambda () (ctx-ref (fiber-context far) 'now)))
+    ;; A write through the mixed-in name stores the member in the service value.
+    (ctx-set! ctx 'now 13)
+    (check-equal? (hash-ref timer 'now) 13)
+    (check-equal? (ctx-ref ctx 'now) 13)
+    ;; A service value that is not a mutable hash cannot be written through.
+    (ctx-provide ctx 'frozen (hasheq 'member 1))
+    (ctx-mixin ctx 'frozen '(member))
+    (check-exn exn:fail:cordis:service? (lambda () (ctx-set! ctx 'member 2)))
+    (check-equal? (ctx-ref ctx 'member) 1)))
 
 ;; source: contract 5, service-resolve-config bullet; service.ts resolveConfig;
 ;; recon 01 S22 (merge order)

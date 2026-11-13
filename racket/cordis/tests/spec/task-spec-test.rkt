@@ -438,6 +438,29 @@
     (check-true (and (sync/timeout spec-timeout (thread-dead-evt (task-thread t))) #t))
     (check-eq? (run-task (lambda () 'scheduler-still-works)) 'scheduler-still-works)))
 
+;; source: contract 2 rule 9, "Inside a task (current-scheduler) is the
+;; scheduler the task belongs to, also when the spawner named it with #:scheduler"
+(test-case "task rule 9: current-scheduler in a task is the task's own scheduler"
+  (with-scheduler (s)
+    (define cust (make-custodian))
+    (define other (make-scheduler #:name 'spec-other #:custodian cust))
+    (dynamic-wind
+     void
+     (lambda ()
+       ;; Spawned from a plain thread whose current scheduler is `s`.
+       (define from-thread
+         (spawn-task (lambda () (eq? (current-scheduler) other)) #:scheduler other))
+       (check-true (and (sync/timeout spec-timeout from-thread) #t))
+       (check-true (task-result from-thread))
+       ;; Spawned from a task of `s`.
+       (check-true
+        (run-task (lambda ()
+                    (await (spawn-task (lambda () (eq? (current-scheduler) other))
+                                       #:scheduler other))))))
+     (lambda ()
+       (scheduler-shutdown! other)
+       (custodian-shutdown-all cust)))))
+
 ;; source: contract 2 rule 9, "the manager thread runs under the scheduler's
 ;; custodian"; contract 2, comment on scheduler-shutdown!
 (test-case "task rule 9: after scheduler-shutdown! pending tasks never run"

@@ -26,8 +26,7 @@
 
 (define (check-url actual expected label)
   (define wanted (if (eq? expected 'null) #f expected))
-  (unless (equal? (describe actual) wanted)
-    (fail-check (format "~a:\n  expected ~s\n  got      ~s" label wanted (describe actual)))))
+  (check-equal? (describe actual) wanted label))
 
 (test-case "URL.parse of one input matches Node"
   (for ([row (in-list (jref table 'parse))])

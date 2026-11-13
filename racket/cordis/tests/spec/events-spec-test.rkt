@@ -257,12 +257,13 @@
     (check-equal? (notes log) '(isolated-scope shared-scope))))
 
 ;; source: contract 7, "Before a non-internal dispatch, if 'internal/dispatch
-;; has listeners, emit (mode name args)"; recon 01 S10
+;; has listeners, emit (mode name args)", "mode is the symbol ..., and for a
+;; waterfall args ends with the innermost procedure"; recon 01 S10
 (test-case "events/internal-dispatch / S10: observes non-internal dispatches only"
   (with-root (ctx)
     (define seen (make-recorder))
     (ctx-on ctx 'internal/dispatch
-            (lambda (mode name args) (note! seen (list (format "~a" mode) name args))))
+            (lambda (mode name args) (note! seen (list mode name args))))
     (ctx-emit ctx 'e 0)
     (ctx-bail ctx 'spec/b 'x 'y)
     (ctx-serial ctx 'spec/s)
@@ -270,14 +271,17 @@
     (ctx-emit ctx 'internal/custom 1)
     (ctx-provide ctx 'svc 1)
     (check-equal? (notes seen)
-                  '(("emit" e (0))
-                    ("bail" spec/b (x y))
-                    ("serial" spec/s ())
-                    ("parallel" spec/p (1))))
-    (ctx-waterfall ctx 'spec/w 'arg (lambda () 'inner))
+                  '((emit e (0))
+                    (bail spec/b (x y))
+                    (serial spec/s ())
+                    (parallel spec/p (1))))
+    (define (inner) 'inner)
+    (ctx-waterfall ctx 'spec/w 'arg inner)
     (define last-seen (last (notes seen)))
-    (check-equal? (take last-seen 2) '("waterfall" spec/w))
-    (check-equal? (first (third last-seen)) 'arg)))
+    (check-equal? (take last-seen 2) '(waterfall spec/w))
+    (check-equal? (length (third last-seen)) 2)
+    (check-equal? (first (third last-seen)) 'arg)
+    (check-eq? (second (third last-seen)) inner)))
 
 ;; source: contract 7, "The listener list used by a dispatch is the list at the
 ;; time the dispatch starts"; recon 01 S7
@@ -398,13 +402,13 @@
       (ctx-on blue 'spec/resolve (lambda (x) (note! log (list 'blue-global x))) #:global? #t)
       (ctx-on ctx 'spec/resolve (lambda (x) (note! log (list 'front x))) #:prepend? #t)
       (ctx-on ctx 'internal/dispatch
-              (lambda (mode name args) (note! announced (list (format "~a" mode) name args))))
+              (lambda (mode name args) (note! announced (list mode name args))))
       (define all (dispatch-callbacks ctx 'emit 'spec/resolve '(1)))
       (check-equal? (length all) 4)
       (check-true (andmap procedure? all))
       ;; Resolution calls no listener and is announced like a dispatch.
       (check-equal? (notes log) '())
-      (check-equal? (notes announced) '(("emit" spec/resolve (1))))
+      (check-equal? (notes announced) '((emit spec/resolve (1))))
       (for ([callback (in-list all)]) (callback 1))
       (check-equal? (notes log) '((front 1) (red 1 #t) (blue 1 #t) (blue-global 1)))
       (check-eq? ((second all) 2) 'red-result)

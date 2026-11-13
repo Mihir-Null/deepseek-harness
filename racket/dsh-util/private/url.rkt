@@ -94,8 +94,9 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Hosts
 
+;; U+0000, tab, LF, CR, space, # / : < > ? @ [ \ ] ^ |
 (define forbidden-host-chars
-  (map char->integer (string->list "\u0000\t\n\r #/:<>?@[\\]^|")))
+  '(#x00 #x09 #x0A #x0D #x20 #x23 #x2F #x3A #x3C #x3E #x3F #x40 #x5B #x5C #x5D #x5E #x7C))
 
 (define (forbidden-host-code-point? n) (memv n forbidden-host-chars))
 
@@ -182,28 +183,29 @@
               (set! pointer start)
               (when (> piece-index 6) (return #f))
               (let v4 ([seen 0])
-                (when (< pointer n)
-                  (when (> seen 0)
-                    (unless (and (eqv? (ch pointer) #\.) (< seen 4)) (return #f))
-                    (set! pointer (add1 pointer)))
-                  (unless (and (ch pointer) (char-numeric? (ch pointer)) (char<=? (ch pointer) #\9))
-                    (return #f))
-                  (define octet
-                    (let digits ([value #f])
-                      (define c (ch pointer))
-                      (cond
-                        [(and c (char<=? #\0 c #\9))
-                         (define d (- (char->integer c) 48))
-                         (when (eqv? value 0) (return #f))
-                         (define next (if value (+ (* value 10) d) d))
-                         (when (> next 255) (return #f))
-                         (set! pointer (add1 pointer))
-                         (digits next)]
-                        [else value])))
-                  (vector-set! pieces piece-index (+ (* (vector-ref pieces piece-index) 256) octet))
-                  (when (or (= seen 1) (= seen 3)) (set! piece-index (add1 piece-index)))
-                  (v4 (add1 seen)))
-                (unless (or (< pointer n) (= seen 4)) (return #f)))]
+                (cond
+                  [(< pointer n)
+                   (when (> seen 0)
+                     (unless (and (eqv? (ch pointer) #\.) (< seen 4)) (return #f))
+                     (set! pointer (add1 pointer)))
+                   (unless (and (ch pointer) (char<=? #\0 (ch pointer) #\9))
+                     (return #f))
+                   (define octet
+                     (let digits ([value #f])
+                       (define c (ch pointer))
+                       (cond
+                         [(and c (char<=? #\0 c #\9))
+                          (define d (- (char->integer c) 48))
+                          (when (eqv? value 0) (return #f))
+                          (define next (if value (+ (* value 10) d) d))
+                          (when (> next 255) (return #f))
+                          (set! pointer (add1 pointer))
+                          (digits next)]
+                         [else value])))
+                   (vector-set! pieces piece-index (+ (* (vector-ref pieces piece-index) 256) octet))
+                   (when (or (= seen 1) (= seen 3)) (set! piece-index (add1 piece-index)))
+                   (v4 (add1 seen))]
+                  [else (unless (= seen 4) (return #f))]))]
              [else
               (cond
                 [(eqv? (ch pointer) #\:)
@@ -309,7 +311,7 @@
      (and (not (for/or ([c (in-string input)]) (forbidden-host-code-point? (char->integer c))))
           (percent-encode input c0-control-set?))]
     [else
-     (define decoded (bytes->string/utf-8 (percent-decode input) #�))
+     (define decoded (bytes->string/utf-8 (percent-decode input) (integer->char #xFFFD)))
      (define ascii (domain->ascii decoded))
      (cond
        [(string=? ascii "") #f]
