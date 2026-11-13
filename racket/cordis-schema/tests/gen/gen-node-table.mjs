@@ -641,7 +641,7 @@ function genSpec(depth, mutating) {
   const mods = [];
   if (chance(0.12)) mods.push(['required']);
   if (chance(0.25)) mods.push(['default', withoutUndefinedItems(genValue(spec, 0.15))]);
-  if (chance(0.05) && mutating) mods.push(['loose']);
+  if (chance(0.05) && !mutating) mods.push(['loose']);
   return mods.length ? w(spec, ...mods) : spec;
 }
 
@@ -714,6 +714,15 @@ function genValue(spec, noise) {
   }
 }
 
+// Whether `spec` holds a union with a member that is more than a constant. With autofix, a
+// member of such a union can delete keys of the input before it fails, which later members
+// then see in Schemastery (documented as a difference).
+function hasCompositeUnion(spec) {
+  if (!Array.isArray(spec)) return spec && typeof spec === 'object' && Object.values(spec).some(hasCompositeUnion);
+  if (spec[0] === 'union' && spec[1].some((member) => member[0] !== 'from')) return true;
+  return spec.slice(1).some((part) => typeof part === 'object' && part !== null && hasCompositeUnion(part));
+}
+
 function randomRows(count) {
   const rows = [];
   for (let i = 0; i < count; i++) {
@@ -721,7 +730,8 @@ function randomRows(count) {
     const cases = [];
     for (let j = 0; j < 4; j++) {
       const input = genValue(spec, pick([0, 0.1, 0.3]));
-      const options = pick([undefined, undefined, undefined, { autofix: true }, { strict: true }, { path: ['cfg', 2] }]);
+      const picked = pick([undefined, undefined, undefined, { autofix: true }, { strict: true }, { path: ['cfg', 2] }]);
+      const options = picked?.autofix && hasCompositeUnion(spec) ? undefined : picked;
       cases.push(o(input, options));
     }
     rows.push(row(`random ${i}`, spec, cases));

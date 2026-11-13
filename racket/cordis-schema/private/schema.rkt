@@ -185,8 +185,9 @@
 ;; Options and errors
 
 ;; rpath is the path from the root, innermost key first. checked? records that volatile
-;; placement was validated for this top-level call.
-(struct resolve-options (autofix? ignore rpath checked?))
+;; placement was validated for this top-level call. claims is the table of that call that
+;; `claim` fills, or #f before the call starts.
+(struct resolve-options (autofix? ignore rpath checked? claims))
 
 (define (valid-path? path)
   (and (list? path)
@@ -194,7 +195,7 @@
          (or (symbol? segment) (string? segment) (exact-nonnegative-integer? segment)))))
 
 (define (make-resolve-options autofix? ignore path)
-  (resolve-options (and autofix? #t) ignore (reverse path) #f))
+  (resolve-options (and autofix? #t) ignore (reverse path) #f #f))
 
 (define (resolve-options-path options)
   (reverse (resolve-options-rpath options)))
@@ -320,7 +321,10 @@
     [(not s) (values data (void) data)]
     [(not (resolve-options-checked? options))
      (validate-volatile s (resolve-options-rpath options) #f)
-     (resolve* data s (struct-copy resolve-options options [checked? #t]) strict?)]
+     (resolve* data
+               s
+               (struct-copy resolve-options options [checked? #t] [claims (make-hasheq)])
+               strict?)]
     [else (resolve* data s options strict?)]))
 
 (define (resolve* data s options strict?)
@@ -431,6 +435,30 @@
      (js-remainder-zero? (abs (- (decimal-shift x digits) (decimal-shift low digits)))
                          (decimal-shift size digits))]
     [else (js-remainder-zero? (- x low) size)]))
+
+;; ---------------------------------------------------------------------------------------------
+;; Members that are undefined
+;;
+;; A Schemastery result object can hold a member whose value is `undefined` (a field whose
+;; loose schema failed, a callback that returned nothing). `merge` treats such a key as present
+;; and does not overwrite it. A jobject cannot hold the member, so the keys are recorded beside
+;; the result, by its identity, for the duration of one top-level resolve.
+
+(define claim-key (string->uninterned-symbol "claim"))
+
+;; `result` with `keys` recorded as its undefined members. The value returned is a new jobject
+;; when there is something to record, so that no other value shares the record.
+(define (claim result keys options)
+  (cond
+    [(null? keys) result]
+    [else
+     (define fresh (jremove (jset result claim-key #t) claim-key))
+     (hash-set! (resolve-options-claims options) fresh keys)
+     fresh]))
+
+;; The keys `v` holds as undefined members.
+(define (claims-of v options)
+  (hash-ref (resolve-options-claims options) v '()))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Containers as Schemastery sees them
@@ -633,8 +661,9 @@
   (unless (plain-object? data)
     (expected "object" data options))
   (define object (->object data))
-  (define-values (result data*)
-    (for/fold ([result empty-jobject] [data* object]) ([key (in-list (jkeys object))])
+  (define-values (result claimed data*)
+    (for/fold ([result empty-jobject] [claimed '()] [data* object])
+              ([key (in-list (jkeys object))])
       (define resolved-key
         (cond
           ;; A key an earlier rename removed is not visited.
@@ -645,13 +674,16 @@
              (resolve-key key s options))]
           [else (resolve-key key s options)]))
       (cond
-        [(not resolved-key) (values result data*)]
+        [(not resolved-key) (values result claimed data*)]
         [else
          (define-values (value written) (property data* key (node-inner s) options))
          (define moved (container-set written resolved-key (jref written key (void))))
          (values (assign result resolved-key value)
+                 (if (void? value)
+                     (cons resolved-key (remq resolved-key claimed))
+                     (remq resolved-key claimed))
                  (if (eq? key resolved-key) written (jremove moved key)))])))
-  (values result (void) (if (eq? data* object) data data*)))
+  (values (claim result claimed options) (void) (if (eq? data* object) data data*)))
 
 (define (resolve-key key s options)
   (define-values (value adapted data*) (resolve (symbol->string key) (node-key s) options #f))
@@ -694,10 +726,12 @@
     (for/fold ([result empty-jobject] [claimed '()] [data* object])
               ([(key child) (in-jobject (or (node-fields s) empty-jobject))])
       (define-values (value written) (property data* key child options))
-      (if (or (not (nullable? value)) (jhas? written key))
-          (values (assign result key value) (cons key claimed) written)
-          (values result claimed written))))
-  (values (if strict? result (merge-missing result data* claimed))
+      (cond
+        [(not (nullable? value)) (values (jset result key value) claimed written)]
+        [(not (jhas? written key)) (values result claimed written)]
+        [(void? value) (values result (cons key claimed) written)]
+        [else (values (jset result key value) claimed written)])))
+  (values (claim (if strict? result (merge-missing result data* claimed)) claimed options)
           (void)
           (if (eq? data* object) data data*)))
 
@@ -733,18 +767,18 @@
             [(nullable? value) result]
             [(nullable? result) value]
             [(not (eq? (js-typeof result) (js-typeof value))) (expected-type s next options)]
-            [(eq? (js-typeof value) 'object) (merge-values result value)]
+            [(eq? (js-typeof value) 'object) (merge-values result value options)]
             [(not (js-strict-equal? result value)) (expected-type s next options)]
             [else result])
           next)))
      (values (if (and (not strict?) (plain-object? data*))
-                 (merge-input result (->object data*))
+                 (merge-input result (->object data*) options)
                  result)
              (void)
              data*)]))
 
 ;; `merge(result, value)` for two values whose JavaScript type is object.
-(define (merge-values result value)
+(define (merge-values result value options)
   (cond
     [(and (list? result) (list? value))
      (if (> (length value) (length result))
@@ -758,15 +792,27 @@
                                              #:unless (void? item))
                                     (cons (number->string index) item))))]
     [(and (plain-object? result) (plain-object? value))
-     (if (or (jobject? result) (hash? result))
-         (merge-missing (->object result) (->object value))
-         result)]
+     (cond
+       [(or (jobject? result) (hash? result))
+        (define claimed (claims-of result options))
+        (define base (->object result))
+        ;; An undefined member of `value` becomes one of the result unless the key is taken.
+        (define inherited
+          (for/list ([key (in-list (claims-of value options))]
+                     #:unless (or (jhas? base key) (memq key claimed)))
+            key))
+        (claim (merge-missing base (->object value) claimed)
+               (append claimed inherited)
+               options)]
+       [else result])]
     [else result]))
 
 ;; `merge(result, data)` at the end of an intersect, for a plain-object input.
-(define (merge-input result data)
+(define (merge-input result data options)
   (cond
-    [(or (jobject? result) (hash? result)) (merge-missing (->object result) data)]
+    [(or (jobject? result) (hash? result))
+     (define claimed (claims-of result options))
+     (claim (merge-missing (->object result) data claimed) claimed options)]
     [(zero? (jcount data)) result]
     [(and (eq? (js-typeof result) 'object) (not (eq? result 'null))) result]
     [else

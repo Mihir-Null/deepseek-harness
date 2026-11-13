@@ -75,9 +75,10 @@
     (define parent
       (ctx-plugin mounted-on
                   (lambda (c config)
-                    (set! child (ctx-plugin (context-extend c (hasheq 'depth 2))
-                                            (make-plugin (lambda (c config) (void))
-                                                         #:inject (hasheq 'db (hasheq 'layer 'own)))))
+                    (set! child
+                          (ctx-plugin (context-extend c (hasheq 'depth 2))
+                                      (make-plugin (lambda (c config) (void))
+                                                   #:inject (hasheq 'db (hasheq 'layer 'own)))))
                     (ctx-provide c 'db 'scoped))))
     (await/t parent)
     (await/t child)
