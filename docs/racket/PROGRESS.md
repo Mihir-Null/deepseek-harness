@@ -41,3 +41,10 @@ Newest entries last. Each entry says what was done and what comes next. Re-read 
 - Wrote `ARCHITECTURE.md` (26 Racket packages in 6 waves), ADRs 0006 to 0010, and the `cordis-data` contract.
 - Running at the time of this entry: the kernel build workflow, the wave 2 foundations workflow (`cordis-data`, then `cordis-schema`, `cordis-yaml`, `dsh-util`), and the wave 3 contract design workflow.
 - Next: when the kernel is green, write the `cordis-loader` contract and build it; when wave 3 contracts pass their consistency review, build wave 3 and run the first end-to-end scripted session.
+
+## Recovery note (container restart during waves 1 to 3)
+
+- The container restarted while three workflows were running. Files on disk and the workflow journals survived; the running agents did not.
+- State found: kernel spec suite complete (207 black-box cases), kernel implementation partly written; `cordis-data` complete; `cordis-schema` and `cordis-yaml` partly written; `dsh-util` not started; wave 3 contracts drafted, consistency review not finished.
+- Recovery procedure that worked: commit the tree, then re-invoke each workflow with `Workflow({scriptPath, resumeFromRunId})`. Finished agents replay from the journal; interrupted agents run again, with a "resumed run" preface added to their prompts telling them to assess existing files first. Scripts are in the session directory under `workflows/scripts/`; run ids: kernel `wf_afe8c425-d67`, wave 2 foundations `wf_d0262d6b-a3c`, wave 3 contracts `wf_71b5a3a1-fac`.
+- A self-scheduled check-in now commits and pushes work in progress every 20 minutes while workflows run, so a restart loses at most that much.
