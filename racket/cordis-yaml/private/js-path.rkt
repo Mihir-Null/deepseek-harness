@@ -5,8 +5,7 @@
 ;;
 ;; None of them touches the file system.
 
-(require racket/list
-         racket/string)
+(require racket/string)
 
 (provide posix-normalize
          posix-join

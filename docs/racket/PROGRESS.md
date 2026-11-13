@@ -63,3 +63,6 @@ Newest entries last. Each entry says what was done and what comes next. Re-read 
 - Known difference recorded for the parity table: `cordis-data` keeps insertion order for object keys that look like array indexes; JavaScript moves those to the front in numeric order.
 - Started wave 3 units `S-B` and `L-1` (run `wf_df933e07-8d5`) and `T-1` (run `wf_12860bc6-c3d`), same script, args `{"units":[...]}`.
 - Coordinator helper scripts (session scratchpad, `coord/`): `status.py` lists workflow journals; `digest.py <run-id>` prints a compact result per finished agent.
+- Wave 4 design, second group, finished: contracts `dsh-context.md`, `dsh-subagent.md`, `dsh-connect.md`, `dsh-platform.md`, `dsh-ptc.md`. First group (`dsh-session-store`, `dsh-exec`, `dsh-fs`, `dsh-interaction`, `dsh-automation`) still running. A consistency review over all ten follows.
+- Started the `cordis-loader` workflow (architect, build by work units, review): script `racket-cordis-loader-wf_9d1d318c-c5a.js`, run `wf_9d1d318c-c5a`.
+- Lesson for workflow scripts: return only compact values (short summary, counts, a few capped strings); long return values flood the coordinator's context.

@@ -3,7 +3,6 @@
 ;; closure-based `make-js-object`, and the Node `process` object with its builtin modules.
 
 (require rackunit
-         racket/generic
          racket/string
          cordis-data
          cordis-yaml/js-expr)

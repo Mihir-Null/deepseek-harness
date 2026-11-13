@@ -4,7 +4,6 @@
 ;; `js-interpolate`. js-yaml-table-test.rkt holds the results Node computed for the same areas.
 
 (require rackunit
-         racket/string
          cordis-data
          cordis-yaml/js-expr)
 

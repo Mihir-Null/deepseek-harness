@@ -3,8 +3,7 @@
 ;; environment that the differential table describes, and `make-recording-environment` gives a
 ;; `ctx` whose services are stubs that record how an expression used them.
 
-(require racket/list
-         racket/string
+(require racket/string
          cordis-data
          cordis-yaml/js-expr
          "../../private/js-path.rkt"

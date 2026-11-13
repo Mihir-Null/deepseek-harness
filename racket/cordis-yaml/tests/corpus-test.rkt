@@ -13,6 +13,7 @@
          racket/list
          racket/match
          racket/string
+         file/sha1
          cordis-data
          cordis-yaml
          cordis-yaml/js-expr

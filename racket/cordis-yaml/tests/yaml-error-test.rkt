@@ -5,7 +5,6 @@
 (require rackunit
          racket/file
          racket/string
-         cordis-data
          cordis-yaml)
 
 (define (u . codes) (list->string (map integer->char codes)))
