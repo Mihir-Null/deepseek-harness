@@ -106,8 +106,18 @@
   (not (thread-dead? (scheduler-manager s))))
 
 ;; The loop state is the holder's request (or #f), a two-list FIFO of waiting requests, the
-;; set of threads that have a queued request, and the time at which to warn about the holder.
+;; set of threads that have a queued request, and the time at which to warn about the holder
+;; (#f once the warning was logged). A hold that outlasts its limit is reported when the
+;; limit passes or, if the manager did not run in between, when the hold ends.
 (define (manager-loop name ch wills)
+  (define (warn! holder)
+    (log-cordis
+     'warning
+     (format "task ~a has held the baton of scheduler ~a for more than ~a ms"
+             (req-label holder) name (req-warn-ms holder))))
+  (define (warn-if-overdue! holder deadline)
+    (when (and deadline (>= (current-inexact-monotonic-milliseconds) deadline))
+      (warn! holder)))
   (let loop ([holder #f] [front '()] [back '()] [queued (hasheq)] [deadline #f])
     (define (enqueue r holder)
       (define th (req-thread r))
@@ -136,29 +146,32 @@
            (case (car msg)
              [(request) (enqueue (cdr msg) holder)]
              [(release)
-              (if (and holder (eq? (req-thread holder) (cdr msg)))
-                  (loop #f front back queued #f)
-                  (loop holder front back queued deadline))]
+              (cond
+                [(and holder (eq? (req-thread holder) (cdr msg)))
+                 (warn-if-overdue! holder deadline)
+                 (loop #f front back queued #f)]
+                [else (loop holder front back queued deadline)])]
              [(yield)
               (define r (cdr msg))
-              (if (and holder (eq? (req-thread holder) (req-thread r)))
-                  (if (hash-ref queued (req-thread r) #f)
-                      (loop #f front back queued #f)
-                      (loop #f front (cons r back) (hash-set queued (req-thread r) #t) #f))
-                  (enqueue r holder))]
+              (cond
+                [(and holder (eq? (req-thread holder) (req-thread r)))
+                 (warn-if-overdue! holder deadline)
+                 (if (hash-ref queued (req-thread r) #f)
+                     (loop #f front back queued #f)
+                     (loop #f front (cons r back) (hash-set queued (req-thread r) #t) #f))]
+                [else (enqueue r holder)])]
              [(shutdown) (void)]
              [else (loop holder front back queued deadline)])))
         (if holder
             (handle-evt (thread-dead-evt (req-thread holder))
-                        (lambda (_) (loop #f front back queued #f)))
+                        (lambda (_)
+                          (warn-if-overdue! holder deadline)
+                          (loop #f front back queued #f)))
             never-evt)
         (if deadline
             (handle-evt (alarm-evt deadline #t)
                         (lambda (_)
-                          (log-cordis
-                           'warning
-                           (format "task ~a has held the baton of scheduler ~a for more than ~a ms"
-                                   (req-label holder) name (req-warn-ms holder)))
+                          (warn! holder)
                           (loop holder front back queued #f)))
             never-evt)
         (handle-evt wills
